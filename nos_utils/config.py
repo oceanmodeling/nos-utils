@@ -8,7 +8,7 @@ The caller provides values directly or uses factory methods.
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 log = logging.getLogger(__name__)
 
@@ -228,6 +228,11 @@ class ForcingConfig:
     # sliced per phase, non-zero uv3D. Off keeps the previous-cycle search, 3-hourly T/S and zero
     # uv3D that SECOFS, Pacific and Alaska use. MJ (10/02/26)
     obc_ops_timeline: bool = False
+    # The two parts of the ops timeline a daily-RTOFS system needs without the rest (ATL numerics,
+    # n-file dating, phase slicing): slot-based file discovery (honours rtofs_daily_3z) and records
+    # spaced obc_dt apart. Implied by obc_ops_timeline. MJ (11/16/26)
+    obc_slot_discovery: bool = False
+    obc_slot_records: bool = False
     # Temporal resolution of the output boundary files (seconds).
     obc_dt: float = 21600.0
     # Apply 2-step temporal moving average to OBC files (STOFS-3D-PAC ops parity).
@@ -337,6 +342,15 @@ class ForcingConfig:
     # fresh-water T/S), vsource.th in ops format. A missing FIX file fails the NWM step.
     # MJ (10/03/26)
     river_ops_static: bool = False
+    # Staged name -> FIX name for river_ops_static; None keeps the STOFS-3D-ATL names. MJ (11/16/26)
+    river_ops_static_names: Optional[Dict[str, str]] = None
+    # Text climatology for the flow-only river boundaries (STOFS-3D-PAC): flux.th and TEM_1.th from
+    # day-of-year rows of two fix files. MJ (11/16/26)
+    river_ob_clim_enabled: bool = False
+    river_ob_clim_discharge_file: str = "river_clim_discharge.txt"
+    river_ob_clim_temperature_file: str = "river_clim_temperature.txt"
+    # Executables searched for nodal factors; None keeps the COMF and STOFS-3D-ATL names. MJ (11/16/26)
+    tide_fac_executables: Optional[List[str]] = None
     # STOFS-3D-ATL bad-day behaviour of production v3.1.5: restart over restart_min_bytes in
     # PDY-1..PDY-5, COLDSTART=YES refused, OBC and nudging files required, no Python tide_fac
     # fallback, NWM vsource backup, previous-cycle reuse via COMOUT_PREV/rerun. MJ (10/05/26)
@@ -735,6 +749,12 @@ class ForcingConfig:
             obc_time_smoothing=True,
             nudging_time_smoothing=True,
             rtofs_daily_3z=True,
+            obc_slot_discovery=True,
+            obc_slot_records=True,
+            # Daily RTOFS records, climatology boundary rivers, and the fixed river set when NWM is absent. MJ (11/16/26)
+            river_ob_clim_enabled=True,
+            tide_fac_executables=["stofs_3d_pac_tide_fac"],
+            critical_sources=["GFS", "PARAM_NML", "TIDAL", "RTOFS", "NUDGING", "RIVER_OB_CLIM"],
             obc_roi_2d={"x1": 222, "x2": 2703, "y1": 1051, "y2": 2641, "x_stride": 2, "y_stride": 2},
             obc_roi_3d={"x1": 222, "x2": 2703, "y1": 1051, "y2": 2641, "x_stride": 2, "y_stride": 2},
             nudge_roi_3d={"x1": 222, "x2": 2703, "y1": 1051, "y2": 2641, "x_stride": 2, "y_stride": 2},
@@ -777,6 +797,12 @@ class ForcingConfig:
             obc_time_smoothing=True,
             nudging_time_smoothing=True,
             rtofs_daily_3z=True,
+            obc_slot_discovery=True,
+            obc_slot_records=True,
+            # Daily RTOFS records, climatology boundary rivers, and the fixed river set when NWM is absent. MJ (11/16/26)
+            river_ob_clim_enabled=True,
+            tide_fac_executables=["stofs_3d_pac_tide_fac"],
+            critical_sources=["GFS", "PARAM_NML", "TIDAL", "RTOFS", "NUDGING", "RIVER_OB_CLIM"],
             obc_roi_2d={"x1": 222, "x2": 2703, "y1": 1051, "y2": 2641, "x_stride": 2, "y_stride": 2},
             obc_roi_3d={"x1": 222, "x2": 2703, "y1": 1051, "y2": 2641, "x_stride": 2, "y_stride": 2},
             nudge_roi_3d={"x1": 222, "x2": 2703, "y1": 1051, "y2": 2641, "x_stride": 2, "y_stride": 2},
@@ -1013,6 +1039,21 @@ class ForcingConfig:
             "forcing.river.ops_static_files",
             str(_sys.get("name", "")).startswith("stofs_3d_atl"))
 
+        _river_d = river if isinstance(river, dict) else {}
+        _names = _river_d.get("ops_static_names")
+        if _names is not None:
+            if not isinstance(_names, dict) or not all(isinstance(v, str) for v in _names.values()):
+                raise ValueError("forcing.river.ops_static_names must map staged names to FIX names")
+            kwargs_river_names = {str(k): str(v) for k, v in _names.items()}
+        else:
+            kwargs_river_names = None
+        _ob = _river_d.get("ob_clim")
+        _ob = _ob if isinstance(_ob, dict) else {}
+        _tidal_d = tidal if isinstance(tidal, dict) else {}
+        _tf = _tidal_d.get("tide_fac_executables")
+        if _tf is not None and (not isinstance(_tf, list) or not all(isinstance(v, str) for v in _tf)):
+            raise ValueError("forcing.tidal.tide_fac_executables must be a list of file names")
+
         # NWM river product and target counts
         river_product = river.get("primary", "nwm") if isinstance(river, dict) else "nwm"
         nwm_product = "medium_range_mem1" if river_product == "nwm" and \
@@ -1063,6 +1104,13 @@ class ForcingConfig:
             adt_weight_file=_adt_wt,
             nwm_product=nwm_product,
             river_ops_static=_river_ops,
+            river_ops_static_names=kwargs_river_names,
+            river_ob_clim_enabled=_strict_bool(
+                _ob.get("enabled"), "forcing.river.ob_clim.enabled", False),
+            river_ob_clim_discharge_file=str(_ob.get("discharge_file", "river_clim_discharge.txt")),
+            river_ob_clim_temperature_file=str(
+                _ob.get("temperature_file", "river_clim_temperature.txt")),
+            tide_fac_executables=list(_tf) if _tf is not None else None,
         )
 
         # HRRR domain bounds (optional, falls back to main domain)
@@ -1087,6 +1135,8 @@ class ForcingConfig:
         nudge = nudge if isinstance(nudge, dict) else {}
         kwargs["rtofs_daily_3z"] = _strict_bool(ocean.get("rtofs_daily_3z"), "ocean.rtofs_daily_3z", False)
         kwargs["obc_dt"] = float(obc.get("dt", 21600.0))
+        kwargs["obc_slot_discovery"] = _strict_bool(obc.get("slot_discovery"), "obc.slot_discovery", False)
+        kwargs["obc_slot_records"] = _strict_bool(obc.get("slot_records"), "obc.slot_records", False)
         kwargs["obc_time_smoothing"] = _strict_bool(obc.get("time_smoothing"), "obc.time_smoothing", False)
         kwargs["nudging_dt"] = float(nudge.get("dt", 10800.0))
         kwargs["nudging_time_smoothing"] = _strict_bool(nudge.get("time_smoothing"), "nudging.time_smoothing", False)

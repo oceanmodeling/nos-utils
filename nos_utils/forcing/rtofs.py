@@ -79,6 +79,16 @@ def _pack_for_fortran(real, scale, offset, fill, fill_mask=None):
     return packed
 
 
+def group_daily_3z(files):
+    """Group the per-variable daily_3z files of one valid time, keeping the given order. MJ (11/16/26)"""
+    from itertools import groupby
+
+    def key(fp):
+        return (str(fp.parent), fp.name.split("_daily")[0])
+
+    return [list(g) for _, g in groupby(files, key=key)]
+
+
 class RTOFSProcessor(ForcingProcessor):
     """
     RTOFS ocean boundary condition processor for SCHISM.
@@ -466,6 +476,22 @@ class RTOFSProcessor(ForcingProcessor):
     def _ops_timeline(self) -> bool:
         """True for the ATL ops timeline (same-day cycle first, 6-hourly records)."""
         return self.is_stofs_mode and bool(self.config.obc_ops_timeline)
+
+    @property
+    def _daily_3z(self) -> bool:
+        return bool(getattr(self.config, "rtofs_daily_3z", False))
+
+    @property
+    def _slot_discovery(self) -> bool:
+        """Slot-based file discovery (honours rtofs_daily_3z): the ops timeline, or its own switch. MJ (11/16/26)"""
+        return self.is_stofs_mode and bool(
+            self.config.obc_ops_timeline or getattr(self.config, "obc_slot_discovery", False))
+
+    @property
+    def _slot_records(self) -> bool:
+        """Records spaced obc_dt apart, written per phase: the ops timeline, or its own switch. MJ (11/16/26)"""
+        return self.is_stofs_mode and bool(
+            self.config.obc_ops_timeline or getattr(self.config, "obc_slot_records", False))
 
     def valid_time(self, path: Path) -> datetime:
         """Valid time of an RTOFS file: the selection's own date, else cycle date + hour tag.
@@ -948,7 +974,7 @@ class RTOFSProcessor(ForcingProcessor):
         if all_times:
             time_var[:] = all_times[:nt]
         else:
-            time_var[:] = np.arange(nt) * 21600.0  # 6-hourly default
+            time_var[:] = np.arange(nt) * float(self.config.obc_dt)
 
         lon_var = nc.createVariable("xlon", "f4", ("ylat", "xlon"))
         # TODO: Check validity for pacific
@@ -1012,9 +1038,7 @@ class RTOFSProcessor(ForcingProcessor):
         # Group files by time if they are split daily files
         is_split = getattr(self.config, "rtofs_daily_3z", False)
         if is_split:
-            from itertools import groupby
-            def get_time_key(fp): return fp.name.split('_daily')[0]
-            file_groups = [list(g) for k, g in groupby(sorted(files_3d, key=get_time_key), key=get_time_key)]
+            file_groups = group_daily_3z(files_3d)
         else:
             file_groups = [[f] for f in files_3d]
 
@@ -1089,7 +1113,7 @@ class RTOFSProcessor(ForcingProcessor):
         nc.createDimension("xlon", nx)
 
         time_var = nc.createVariable("time", "f8", ("time",))
-        time_var[:] = np.arange(nt) * 21600.0
+        time_var[:] = np.arange(nt) * float(self.config.obc_dt)
 
         if all_depth is not None:
             dep_var = nc.createVariable("depth", "f4", ("lev",))
@@ -1401,7 +1425,7 @@ class RTOFSProcessor(ForcingProcessor):
         first and fills missing 6-hourly slots from the previous cycle, see
         _find_ops_files.
         """
-        if self._ops_timeline:
+        if self._slot_discovery:
             return self._find_ops_files()
         base_date = datetime.strptime(self.config.pdy, "%Y%m%d")
         # Ops stages "alaska", "US_east" and "US_west" 3dz tiles side by
@@ -1639,20 +1663,33 @@ class RTOFSProcessor(ForcingProcessor):
         self._valid_times = {}
         self._select_notes = []
         picked = {"2d": {}, "3d": {}}
+        src = {}
         n_prev = {"2d": 0, "3d": 0}
         for date in (base, base - timedelta(days=1)):
             for kind in ("2d", "3d"):
+                daily = kind == "3d" and self._daily_3z
                 for vt, is_n, f in sorted(self._ops_candidates(date, kind),
                                           key=lambda c: (c[0], c[1])):
-                    if vt in want and vt not in picked[kind]:
-                        picked[kind][vt] = f
-                        self._valid_times[f] = vt
+                    # Ops pairs the 00z daily 3D file with the 12z 2D file of the same day, so
+                    # a daily file takes the slot of its calendar day and that slot's time. MJ (11/16/26)
+                    slot = next((t for t in slots if t.date() == vt.date()), None) if daily else vt
+                    if slot not in want:
+                        continue
+                    if slot not in picked[kind]:
+                        picked[kind][slot] = [f] if daily else f
+                        src[(kind, slot)] = (date, vt)
                         n_prev[kind] += date != base
+                    elif daily and src[(kind, slot)] == (date, vt):
+                        picked[kind][slot].append(f)
+                    else:
+                        continue
+                    self._valid_times[f] = slot
         self._rtofs_cycle_date = base
         out = {}
         for kind in ("2d", "3d"):
             have = [vt for vt in slots if vt in picked[kind]]
-            out[kind] = [picked[kind][vt] for vt in have]
+            out[kind] = [x for vt in have for x in (picked[kind][vt] if isinstance(picked[kind][vt], list)
+                                                    else [picked[kind][vt]])]
             if have and n_prev[kind]:
                 self._select_notes.append(
                     f"RTOFS {kind}: {n_prev[kind]} of {len(have)} slots filled from the previous cycle")
@@ -2035,7 +2072,7 @@ class RTOFSProcessor(ForcingProcessor):
         self._ssh_blended_used = bool(ssh_source) and (ops_ssh is not None or blended is not None)
         self._elev2d_interp = "ops" if ops_ssh is not None else (
             "delaunay" if blended is not None else ("precomputed" if ssh_weights else "raw"))
-        if ops_ssh is not None and self._ops_timeline:
+        if ops_ssh is not None and self._slot_records:
             return self._write_elev2d_ops(files_2d, ops_ssh, hold)
         if ops_ssh is None:
             if blended is not None:
@@ -2591,12 +2628,13 @@ class RTOFSProcessor(ForcingProcessor):
             all_temp = []
             all_salt = []
             # Ops-equivalent T/S from TSUV_1.nc; the per-file loop below is the fallback. MJ (10/01/26)
-            ops_ts = (self._ops_ts_profiles(self._tsuv1_path, len(files_3d), self._ssh1_path,
-                                            uv=self._ops_timeline)
+            per_time = [g[0] for g in group_daily_3z(files_3d)] if self._daily_3z else files_3d
+            ops_ts = (self._ops_ts_profiles(self._tsuv1_path, len(per_time), self._ssh1_path,
+                                            uv=self._slot_records)
                       if self.is_stofs_mode and self._tsuv1_path else None)
-            if ops_ts is not None and self._ops_timeline:
+            if ops_ts is not None and self._slot_records:
                 self._ts_interp = "ops+surfT-mask" if self._ts_mask_fallback else "ops"
-                return self._write_3d_ops(files_3d, *ops_ts)
+                return self._write_3d_ops(per_time, *ops_ts)
             if ops_ts is not None:
                 all_temp, all_salt = ops_ts
             self._ts_interp = (

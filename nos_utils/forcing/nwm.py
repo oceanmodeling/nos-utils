@@ -1533,6 +1533,10 @@ class NWMProcessor(ForcingProcessor):
             line = f"{(0, 3600)[t_idx]} " + " ".join(line.split()[1:])
         return line + "\n"
 
+    @property
+    def _ops_river_fix(self) -> Dict[str, str]:
+        return getattr(self.config, "river_ops_static_names", None) or _OPS_RIVER_FIX
+
     def _find_ops_river_fix(self, name: str) -> Optional[Path]:
         for fix_dir in self._fix_search_dirs():
             if (fix_dir / name).is_file():
@@ -1548,8 +1552,8 @@ class NWMProcessor(ForcingProcessor):
         Raises FileNotFoundError when a file is missing and ValueError on a mismatch.
         MJ (10/03/26)
         """
-        found = {out: self._find_ops_river_fix(fix) for out, fix in _OPS_RIVER_FIX.items()}
-        missing = [fix for out, fix in _OPS_RIVER_FIX.items() if found[out] is None]
+        found = {out: self._find_ops_river_fix(fix) for out, fix in self._ops_river_fix.items()}
+        missing = [fix for out, fix in self._ops_river_fix.items() if found[out] is None]
         if missing:
             raise FileNotFoundError(
                 f"required STOFS-3D-ATL river FIX file(s) {', '.join(missing)} not found in "
@@ -1579,7 +1583,7 @@ class NWMProcessor(ForcingProcessor):
                                  f"{want_cols} for {n_src} sources and {n_sink} sinks")
 
         staged = []
-        for out in _OPS_RIVER_FIX:
+        for out in self._ops_river_fix:
             dst = self.output_path / out
             shutil.copy2(found[out], dst)
             staged.append(dst)

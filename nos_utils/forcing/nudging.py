@@ -746,9 +746,8 @@ class NudgingProcessor(ForcingProcessor):
 
         is_split = getattr(self.config, "rtofs_daily_3z", False)
         if is_split:
-            from itertools import groupby
-            def get_time_key(fp): return fp.name.split('_daily')[0]
-            file_groups = [list(g) for k, g in groupby(sorted(files_3d, key=get_time_key), key=get_time_key)]
+            from .rtofs import group_daily_3z
+            file_groups = group_daily_3z(files_3d)
         else:
             file_groups = [[f] for f in files_3d]
 
