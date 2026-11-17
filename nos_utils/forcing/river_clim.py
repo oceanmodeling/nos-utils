@@ -637,6 +637,9 @@ class RiverOBClimProcessor(ForcingProcessor):
 
     def process(self) -> ForcingResult:
         self.create_output_dir()
+        from ._log import log_input_files
+        log_input_files(self.SOURCE_NAME, self.find_input_files(), source="RIVER_OB_CLIM",
+                        category="river", note=f"pdy={self.config.pdy} cyc={self.config.cyc:02d}")
         day0 = self._day0()
         outputs, errors = [], []
         for out_name, src in self._files():

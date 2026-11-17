@@ -810,7 +810,7 @@ class PrepOrchestrator:
                         n_t = int(ds.variables["time"].shape[0])
                     else:
                         continue
-                if source_counts and self.config.obc_ops_timeline:
+                if source_counts and (self.config.obc_ops_timeline or self.config.obc_slot_records):
                     n_t = int(source_counts["2d" if name == "elev2D.th.nc" else "3d"])
                 file_dims[name] = n_t
                 if n_t < min_t:

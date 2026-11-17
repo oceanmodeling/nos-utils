@@ -584,8 +584,8 @@ class ADTBlender:
                          adt_dst=None) -> Optional[Path]:
         """Apply the ops ADT blend to SSH_1.nc.
 
-        Formula: SSH_final(t) = SSH_rtofs(t) - SSH_rtofs(t=0) + ADT + datum_offset
-        (ADT already carries adt_datum_offset, applied per day on read/regrid), in float32 as ncap2. Where either
+        Formula: SSH_final(t) = SSH_rtofs(t) - SSH_rtofs(t=0) + ADT, where ADT already includes
+        adt_datum_offset (applied once, per day, on read/regrid; not added again here), in float32 as ncap2. Where either
         side is invalid the point is left as the -30000 fill (dry in gen_3Dth).
         """
         try:
@@ -601,7 +601,8 @@ class ADTBlender:
             dst_lat = np.array(ds.variables["ylat"][:], dtype=np.float64)
             if dst_lon.ndim == 1:
                 dst_lon, dst_lat = np.meshgrid(dst_lon, dst_lat)
-            # SSH_1 longitudes are RTOFS lon-360 (_stofs_prepare_ssh), same as ADT. MJ (10/01/26)
+            # SSH_1 longitudes are RTOFS lon-360 for -180/180 systems and unshifted RTOFS lon for the
+            # 0-360 Pacific (_stofs_prepare_ssh); the ADT is shifted to the same convention. MJ (11/17/26)
             dst_lon_adt = dst_lon
 
             if adt_dst is None:

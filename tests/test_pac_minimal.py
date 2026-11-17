@@ -75,11 +75,11 @@ class TestPacificValues:
     def test_from_yaml_parses_the_new_keys(self, tmp_path):
         c = _yaml_cfg(tmp_path, {
             "ocean": {"obc": {"slot_discovery": True, "slot_records": True}},
-            "river": {"ops_static_names": {"source_sink.in": "a"},
+            "river": {"ops_static_names": {"source_sink.in": "a", "msource.th": "b", "vsink.th": "c"},
                       "ob_clim": {"enabled": True, "discharge_file": "q.txt"}},
             "tidal": {"tide_fac_executables": ["stofs_3d_pac_tide_fac"]}})
         assert c.obc_slot_discovery and c.obc_slot_records
-        assert c.river_ops_static_names == {"source_sink.in": "a"}
+        assert c.river_ops_static_names == {"source_sink.in": "a", "msource.th": "b", "vsink.th": "c"}
         assert c.river_ob_clim_enabled and c.river_ob_clim_discharge_file == "q.txt"
         assert c.river_ob_clim_temperature_file == "river_clim_temperature.txt"
         assert c.tide_fac_executables == ["stofs_3d_pac_tide_fac"]
@@ -201,6 +201,11 @@ class TestDailyDiscovery:
         p.validate_file_size = lambda path, m=0: True
         f2, _ = p.find_input_files_by_type()
         assert [x.name.split("_")[3] for x in f2] == ["n012", "n018", "f006", "f012"]
+        for tag in ("n018", "f006", "f012"):
+            (d / f"rtofs_glo_3dz_{tag}_6hrly_hvr_US_east.nc").write_bytes(b"x")
+        _, f3 = p.find_input_files_by_type()
+        assert [x.name.split("_")[3] for x in f3] == ["n018", "f006", "f012"]
+        assert p._per_time(f3) == f3
 
 
 def rc_group(files):
@@ -257,13 +262,236 @@ class TestOBClimRows:
         res = rc.RiverOBClimProcessor(_cfg("stofs_3d_pac"), tmp_path, tmp_path / "out").process()
         assert not res.success
 
-    def test_orchestrator_wiring(self, tmp_path):
+    def test_orchestrator_run_calls_the_stage(self, tmp_path):
+        from unittest.mock import MagicMock
+        from nos_utils.forcing.base import ForcingResult
         from nos_utils.orchestrator import PrepOrchestrator
+        orch = PrepOrchestrator(_cfg("stofs_3d_pac"), {"fix": str(tmp_path), "output": str(tmp_path / "w")},
+                                run_name="stofs_3d_pac", skip_legacy=True)
+        orch._run_river_ob_clim = MagicMock(
+            return_value=ForcingResult(success=True, source="RIVER_OB_CLIM"))
+        res = orch.run("nowcast")
+        orch._run_river_ob_clim.assert_called_once()
+        assert "RIVER_OB_CLIM" in {r.source for r in res.results}
+
+    def test_stage_writes_files_and_logs_inputs(self, tmp_path):
+        from nos_utils.forcing._log import start_input_capture, drain_input_capture
         fix = tmp_path / "fix"
-        fix.mkdir(parents=True)
+        fix.mkdir()
         for n in ("river_clim_discharge.txt", "river_clim_temperature.txt"):
             (fix / n).write_text("\n".join(FILE) + "\n")
-        orch = PrepOrchestrator(_cfg("stofs_3d_pac"), {"fix": str(fix)})
-        out = tmp_path / "w"
-        res = orch._run_river_ob_clim(out)
-        assert res.success and res.source == "RIVER_OB_CLIM"
+        start_input_capture()
+        res = rc.RiverOBClimProcessor(_cfg("stofs_3d_pac"), fix, tmp_path / "w").process()
+        groups = drain_input_capture()
+        assert res.success and "RIVER_OB_CLIM" in repr(groups)
+
+    def test_both_flux_writers_enabled_is_an_error(self):
+        with pytest.raises(ValueError, match="both write flux.th"):
+            _cfg("stofs_3d_atl", river_ob_clim_enabled=True)
+
+
+class TestSshLongitudeConvention:
+    def _ssh1(self, tmp_path, cfg, lon1):
+        nx, ny = len(lon1), 5
+        f = tmp_path / "rtofs_glo_2ds_f012_diag.nc"
+        with Dataset(str(f), "w") as d:
+            d.createDimension("MT", 1); d.createDimension("Y", ny); d.createDimension("X", nx)
+            d.createVariable("Longitude", "f4", ("Y", "X"))[:] = np.tile(lon1, (ny, 1))
+            d.createVariable("Latitude", "f4", ("Y", "X"))[:] = np.tile(np.linspace(0, 40, ny)[:, None], (1, nx))
+            d.createVariable("ssh", "f4", ("MT", "Y", "X"))[:] = 0.5
+        cfg.obc_roi_2d = {"x1": 0, "x2": nx - 1, "y1": 0, "y2": ny - 1}
+        p = RTOFSProcessor(cfg, tmp_path, tmp_path / "out")
+        return p, p._stofs_prepare_ssh([f], tmp_path)
+
+    def test_pacific_keeps_0360_and_adt_bounds_overlap(self, tmp_path):
+        from nos_utils.forcing.adt import ADTBlender
+        lon1 = np.linspace(92.0, 284.0, 41)
+        p, ssh1 = self._ssh1(tmp_path, _cfg("stofs_3d_pac"), lon1)
+        with Dataset(str(ssh1)) as d:
+            xl = d["xlon"][:]
+        assert xl.min() > 90 and xl.max() < 290
+        p._bnd_lons = np.array([100.0, 179.0, 181.0, 250.0])
+        p._bnd_lats = np.full(4, 20.0)
+        *_, inside = p._ops_weights(xl, np.tile(np.linspace(0, 40, 5)[:, None], (1, xl.shape[1])))
+        assert all(inside)
+        lo, hi, _, _ = ADTBlender(_cfg("stofs_3d_pac"), tmp_path)._dest_bounds(ssh1)
+        assert lo < 100.0 and hi > 280.0
+
+    def test_atl_ssh1_is_still_lon_minus_360(self, tmp_path):
+        lon1 = np.linspace(285.0, 310.0, 11)
+        _, ssh1 = self._ssh1(tmp_path, _cfg("stofs_3d_atl"), lon1)
+        with Dataset(str(ssh1)) as d:
+            np.testing.assert_array_equal(d["xlon"][0, :], (lon1 - 360).astype(np.float32))
+
+
+class TestQcAndRecordCounts:
+    def test_pacific_three_record_nowcast_is_not_short(self, tmp_path):
+        from nos_utils.orchestrator import PrepOrchestrator
+        cfg = _cfg("stofs_3d_pac")
+        for name in ("elev2D.th.nc", "TEM_3D.th.nc", "SAL_3D.th.nc", "uv3D.th.nc"):
+            with Dataset(tmp_path / name, "w") as d:
+                d.createDimension("time", None)
+                d.createVariable("time", "f8", ("time",))[:] = [0, 86400, 172800]
+        orch = PrepOrchestrator(cfg, {"fix": str(tmp_path)}, run_name="stofs_3d_pac")
+        assert orch._qc_obc_dimensions(tmp_path, {"2d": 5, "3d": 5}, phase="nowcast") is None
+        res = orch._qc_obc_dimensions(tmp_path, {"2d": 5, "3d": 1}, phase="nowcast")
+        assert res is not None and any("TEM_3D" in w for w in res.warnings)
+
+    def test_source_records_count_daily_groups(self, tmp_path, monkeypatch):
+        _daily_tree(tmp_path, "20261001")
+        monkeypatch.setattr(RTOFSProcessor, "validate_file_size", lambda self, p, m=0: True)
+        p = RTOFSProcessor(_cfg("stofs_3d_pac"), tmp_path, tmp_path / "out")
+        _, f3 = p.find_input_files_by_type()
+        assert len(f3) == 20 and len(p._per_time(f3)) == 5
+
+
+class TestIncompleteDailyGroup:
+    def test_missing_u_leaves_the_slot_unfilled_and_does_not_crash(self, tmp_path, monkeypatch, caplog):
+        _daily_tree(tmp_path, "20261001")
+        (tmp_path / "rtofs.20261001" / "rtofs_glo_3dz_f024_daily_3zuio.nc").unlink()
+        monkeypatch.setattr(RTOFSProcessor, "validate_file_size", lambda self, p, m=0: True)
+        p = RTOFSProcessor(_cfg("stofs_3d_pac"), tmp_path, tmp_path / "out")
+        _, f3 = p.find_input_files_by_type()
+        assert len(f3) == 16 and all("_f024_" not in f.name for f in f3)
+        assert "lacks ['u']" in caplog.text
+
+    def test_tsuv_skips_a_group_without_u(self, tmp_path):
+        files = []
+        for tag, vars_ in (("n024", "tsuv"), ("f024", "tsv")):
+            for v in vars_:
+                name = {"t": "temperature", "s": "salinity", "u": "u", "v": "v"}[v]
+                f = tmp_path / f"rtofs_glo_3dz_{tag}_daily_3z{v}io.nc"
+                with Dataset(str(f), "w") as d:
+                    d.createDimension("MT", 1); d.createDimension("Depth", 2)
+                    d.createDimension("Y", 3); d.createDimension("X", 4)
+                    d.createVariable("Depth", "f4", ("Depth",))[:] = [0, 10]
+                    d.createVariable("Longitude", "f4", ("Y", "X"))[:] = 150.0
+                    d.createVariable("Latitude", "f4", ("Y", "X"))[:] = 10.0
+                    d.createVariable(name, "f4", ("MT", "Depth", "Y", "X"))[:] = 1.0
+                files.append(f)
+        cfg = _cfg("stofs_3d_pac")
+        cfg.obc_roi_3d = {"x1": 0, "x2": 3, "y1": 0, "y2": 2}
+        out = RTOFSProcessor(cfg, tmp_path, tmp_path / "o")._stofs_prepare_tsuv(sorted(files), tmp_path)
+        with Dataset(out) as d:
+            assert d.dimensions["time"].size == 1
+
+
+class TestSlotWritersSmoothing:
+    def _proc(self, tmp_path, phase, smooth):
+        cfg = _cfg("stofs_3d_pac", obc_time_smoothing=smooth)
+        out = tmp_path / "out"
+        out.mkdir(parents=True, exist_ok=True)
+        p = RTOFSProcessor(cfg, tmp_path, out, phase=phase)
+        p._bnd_lons = np.array([150.0, 160.0]); p._bnd_lats = np.array([0.0, 1.0])
+        p._rtofs_cycle_date = datetime(2026, 10, 1)
+        return cfg, p
+
+    @pytest.mark.parametrize("phase,n", [("nowcast", 3), ("forecast", 4)])
+    def test_elev2d_keeps_the_phase_count_and_averages_neighbours(self, tmp_path, phase, n):
+        cfg, p = self._proc(tmp_path, phase, True)
+        t0, _, dur = p._get_output_window(phase)
+        assert int(np.ceil(dur / cfg.obc_dt)) + 1 == n
+        files = [tmp_path / f"f{k}.nc" for k in range(6)]
+        for k, f in enumerate(files):
+            p._valid_times[f] = t0 + timedelta(days=k)
+        ssh = np.array([[k, 10.0 * k] for k in range(6)], np.float32)
+        out = p._write_elev2d_ops(files, ssh, hold=False)
+        with Dataset(out) as d:
+            ts = d["time_series"][:, :, 0, 0]
+            assert ts.shape[0] == n
+            np.testing.assert_allclose(ts[:, 0], [k + 0.5 for k in range(n)], atol=1e-5)
+            np.testing.assert_array_equal(d["time"][:], np.arange(n) * cfg.obc_dt)
+        cfg2, p2 = self._proc(tmp_path / "b", phase, False)
+        for k, f in enumerate(files):
+            p2._valid_times[f] = t0 + timedelta(days=k)
+        with Dataset(p2._write_elev2d_ops(files, ssh, hold=False)) as d:
+            np.testing.assert_allclose(d["time_series"][:, 0, 0, 0], np.arange(n), atol=1e-5)
+
+    def test_3d_slot_writer_averages_t_s_uv(self, tmp_path):
+        cfg, p = self._proc(tmp_path, "nowcast", True)
+        t0, _, _ = p._get_output_window("nowcast")
+        files = [tmp_path / f"g{k}.nc" for k in range(6)]
+        for k, f in enumerate(files):
+            p._valid_times[f] = t0 + timedelta(days=k)
+        arrs = [[np.full((2, 3), float(k), np.float32) for k in range(6)] for _ in range(4)]
+        out = p._write_3d_ops(files, *arrs)
+        assert len(out) == 3
+        with Dataset(out[0]) as d:
+            ts = d["time_series"][:]
+            assert ts.shape[0] == 3
+            np.testing.assert_allclose(ts[:, 0, 0, 0], [0.5, 1.5, 2.5], atol=1e-5)
+
+
+class TestDailyFallbackFailsLoudly:
+    def test_no_tsuv_path_returns_no_files(self, tmp_path, caplog):
+        p = RTOFSProcessor(_cfg("stofs_3d_pac"), tmp_path, tmp_path / "out")
+        p._bnd_lons = np.array([150.0]); p._bnd_lats = np.array([0.0])
+        files = [tmp_path / "rtofs_glo_3dz_n024_daily_3ztio.nc"]
+        assert p._process_3d(files) == []
+        assert "per-file fallback" in caplog.text
+
+
+class TestConfigValidation:
+    def test_static_names_must_be_the_three_keys(self, tmp_path):
+        with pytest.raises(ValueError, match="source_sink.in, msource.th and vsink.th"):
+            _yaml_cfg(tmp_path, {"river": {"ops_static_names": {"source_sink.in": "a"}}})
+
+    def test_null_numeric_yaml_values_use_defaults(self, tmp_path):
+        c = _yaml_cfg(tmp_path, {"ocean": {"obc": {"dt": None}, "nudging": {"dt": None},
+                                           "adt": {"datum_offset": None}}})
+        assert c.obc_dt == 21600.0 and c.nudging_dt == 10800.0 and c.adt_datum_offset == -0.45
+
+    def test_pacific_ufs_forecast_hours(self):
+        assert _cfg("stofs_3d_pac_ufs").ufs_nhours_fcst == 72
+
+    def test_missing_fix_error_is_system_neutral_for_custom_names(self, tmp_path):
+        from nos_utils.forcing.nwm import NWMProcessor
+        p = NWMProcessor.__new__(NWMProcessor)
+        p.config = _cfg("stofs_3d_atl", river_ops_static_names={
+            "source_sink.in": "a", "msource.th": "b", "vsink.th": "c"})
+        p._fix_search_dirs = lambda: [tmp_path]
+        with pytest.raises(FileNotFoundError) as e:
+            p._stage_ops_river_files()
+        assert "ATL" not in str(e.value) and "fetch_stofs" not in str(e.value)
+
+
+class _NudgeBase:
+    pass
+
+
+def _nudge_counts(tmp_path, phase, smooth):
+    from unittest.mock import patch
+    from tests.test_nudging import TestNudgingWithSyntheticRTOFS as T
+    from nos_utils.forcing.nudging import NudgingProcessor
+    t = T()
+    n = 5
+    lons = np.linspace(-77.0, -73.0, n); lats = np.linspace(30.0, 34.0, n)
+    t._make_gr3(tmp_path / "n.gr3", n, lons, lats, np.ones(n))
+    t._make_grid(tmp_path / "hgrid.ll", n, lons, lats, np.full(n, 100.0))
+    t._make_vgrid_simple(tmp_path / "vgrid.in", nvrt=10)
+    d = tmp_path / "rtofs.20260331"
+    d.mkdir()
+    for fhr in range(12, 133, 6):
+        t._make_rtofs_3d(d / f"rtofs_glo_3dz_f{fhr:03d}_6hrly_hvr_US_east.nc", 1, 5, (-80, -70), (28, 36), 20)
+    cfg = ForcingConfig(lon_min=-80.0, lon_max=-70.0, lat_min=28.0, lat_max=36.0, pdy="20260401", cyc=12,
+                        nowcast_hours=24, forecast_hours=48, nudging_enabled=True, n_levels=10,
+                        grid_file=tmp_path / "hgrid.ll", nudging_dt=86400.0, nudging_time_smoothing=smooth)
+    proc = NudgingProcessor(cfg, tmp_path, tmp_path / "o", nudge_weight_file=tmp_path / "n.gr3",
+                            rtofs_input_path=tmp_path, phase=phase)
+    from nos_utils.io.schism_vgrid import SchismVgrid
+    with patch.object(proc, "_load_vgrid", return_value=SchismVgrid.read(tmp_path / "vgrid.in")), \
+            patch("nos_utils.forcing.rtofs.RTOFSProcessor.validate_file_size", return_value=True):
+        res = proc.process()
+    assert res.success, res.errors
+    with Dataset(tmp_path / "o" / "TEM_nu.nc") as ds:
+        return ds.dimensions["time"].size
+
+
+class TestNudgingSmoothedCounts:
+    @pytest.mark.parametrize("phase,n", [("nowcast", 2), ("forecast", 3)])
+    def test_daily_smoothed_records_match_what_the_run_needs(self, tmp_path, phase, n):
+        assert _nudge_counts(tmp_path, phase, True) == n
+
+    @pytest.mark.parametrize("phase,n", [("nowcast", 2), ("forecast", 3)])
+    def test_unsmoothed_counts_are_unchanged(self, tmp_path, phase, n):
+        assert _nudge_counts(tmp_path, phase, False) == n

@@ -36,6 +36,7 @@ Works with any SCHISM-based OFS (SECOFS, STOFS-3D-ATL, CREOFS, etc.)
 
 import logging
 import os
+import re
 import shutil
 import subprocess
 from datetime import datetime, timedelta
@@ -77,6 +78,12 @@ def _pack_for_fortran(real, scale, offset, fill, fill_mask=None):
         mask = mask | fill_mask
     packed = np.where(mask, fill, packed)
     return packed
+
+
+def _average_pairs(a):
+    """2-step moving average along time: record k becomes the mean of k and k+1, one record shorter. MJ (11/17/26)"""
+    a = np.asarray(a)
+    return ((a[:-1] + a[1:]) / 2.0).astype(a.dtype)
 
 
 def group_daily_3z(files):
@@ -477,6 +484,10 @@ class RTOFSProcessor(ForcingProcessor):
         """True for the ATL ops timeline (same-day cycle first, 6-hourly records)."""
         return self.is_stofs_mode and bool(self.config.obc_ops_timeline)
 
+    def _per_time(self, files_3d):
+        """One file per valid time: the first of each daily group, else the files as given. MJ (11/17/26)"""
+        return [g[0] for g in group_daily_3z(files_3d)] if self._daily_3z else list(files_3d)
+
     @property
     def _daily_3z(self) -> bool:
         return bool(getattr(self.config, "rtofs_daily_3z", False))
@@ -862,7 +873,7 @@ class RTOFSProcessor(ForcingProcessor):
                     "ts_interp": "fortran" if fortran_ok else self._ts_interp,
                     "n_2d_files": len(files_2d),
                     "n_3d_files": len(files_3d),
-                    "n_source_records": {"2d": len(files_2d), "3d": len(files_3d)},
+                    "n_source_records": {"2d": len(files_2d), "3d": len(self._per_time(files_3d))},
                     "stofs_mode": True,
                     "fortran_used": fortran_ok,
                     "adt_blended": adt_blended,
@@ -977,8 +988,9 @@ class RTOFSProcessor(ForcingProcessor):
             time_var[:] = np.arange(nt) * float(self.config.obc_dt)
 
         lon_var = nc.createVariable("xlon", "f4", ("ylat", "xlon"))
-        # TODO: Check validity for pacific
-        lon_var[:] = all_lon - 360
+        # The 0-360 Pacific mesh keeps RTOFS longitudes; -180/180 systems shift by 360. MJ (11/17/26)
+        from ..coords import lon_convention
+        lon_var[:] = all_lon if lon_convention(self.config) == "0360" else all_lon - 360
 
         lat_var = nc.createVariable("ylat", "f4", ("ylat", "xlon"))
         lat_var[:] = all_lat
@@ -1054,7 +1066,9 @@ class RTOFSProcessor(ForcingProcessor):
                 for ds in datasets[1:]:
                     subset.update(self._stofs_subset_roi(ds, roi, ["temperature", "salinity", "u", "v"]))
 
-                if "temperature" not in subset:
+                missing = [k for k in ("temperature", "salinity", "u", "v") if k not in subset]
+                if missing:
+                    log.warning(f"3D group {group[0].name} lacks {missing}; skipped")
                     continue
 
                 for t in range(subset["temperature"].shape[0]):
@@ -1668,8 +1682,18 @@ class RTOFSProcessor(ForcingProcessor):
         for date in (base, base - timedelta(days=1)):
             for kind in ("2d", "3d"):
                 daily = kind == "3d" and self._daily_3z
-                for vt, is_n, f in sorted(self._ops_candidates(date, kind),
-                                          key=lambda c: (c[0], c[1])):
+                cands = sorted(self._ops_candidates(date, kind), key=lambda c: (c[0], c[1]))
+                if daily:
+                    have_vars = {}
+                    for vt, _, f in cands:
+                        m = re.search(r"_daily_3z([tsuv])io", f.name)
+                        have_vars.setdefault(vt, set()).add(m.group(1) if m else "?")
+                    bad = {vt for vt, v in have_vars.items() if v != set("tsuv")}
+                    for vt in sorted(bad):
+                        log.warning(f"RTOFS daily 3D {vt:%Y-%m-%d %Hz} in rtofs.{date:%Y%m%d} lacks "
+                                    f"{sorted(set('tsuv') - have_vars[vt])}; slot left for the previous cycle")
+                    cands = [c for c in cands if c[0] not in bad]
+                for vt, is_n, f in cands:
                     # Ops pairs the 00z daily 3D file with the 12z 2D file of the same day, so
                     # a daily file takes the slot of its calendar day and that slot's time. MJ (11/16/26)
                     slot = next((t for t in slots if t.date() == vt.date()), None) if daily else vt
@@ -1678,7 +1702,8 @@ class RTOFSProcessor(ForcingProcessor):
                     if slot not in picked[kind]:
                         picked[kind][slot] = [f] if daily else f
                         src[(kind, slot)] = (date, vt)
-                        n_prev[kind] += date != base
+                        # rtofs.PDY-1 n024 is where ops takes the first daily 3D record, not a gap fill. MJ (11/17/26)
+                        n_prev[kind] += date != base and not (daily and "_n024_" in f.name)
                     elif daily and src[(kind, slot)] == (date, vt):
                         picked[kind][slot].append(f)
                     else:
@@ -2302,13 +2327,17 @@ class RTOFSProcessor(ForcingProcessor):
             off = np.float32(self.config.obc_ssh_offset)
             model_t0, _, dur = self._get_output_window(self.phase)
             n = int(np.ceil(dur / self.config.obc_dt)) + 1
+            smooth = bool(self.config.obc_time_smoothing)
+            n_in = n + 1 if smooth else n
             if hold:
-                rows = np.repeat(ops_ssh[:1] + off, n, axis=0)
+                rows = np.repeat(ops_ssh[:1] + off, n_in, axis=0)
             else:
                 times = [(self.valid_time(f) - model_t0).total_seconds() for f in files_2d]
-                rows = resample_records(ops_ssh + off, times, self.config.obc_dt, n)
-            time_axis = np.arange(n, dtype=np.float64) * self.config.obc_dt
+                rows = resample_records(ops_ssh + off, times, self.config.obc_dt, n_in)
+            time_axis = np.arange(n_in, dtype=np.float64) * self.config.obc_dt
             rows, self._wl_bias_info = self._apply_wl_bias(rows, time_axis, model_t0)
+            if smooth:
+                rows, time_axis = _average_pairs(rows), time_axis[:n]
             return self._write_elev2d(rows, time_axis, self.config.obc_dt)
         except Exception as e:
             log.error(f"Failed to write ops elev2D: {e}")
@@ -2628,13 +2657,18 @@ class RTOFSProcessor(ForcingProcessor):
             all_temp = []
             all_salt = []
             # Ops-equivalent T/S from TSUV_1.nc; the per-file loop below is the fallback. MJ (10/01/26)
-            per_time = [g[0] for g in group_daily_3z(files_3d)] if self._daily_3z else files_3d
+            per_time = self._per_time(files_3d)
             ops_ts = (self._ops_ts_profiles(self._tsuv1_path, len(per_time), self._ssh1_path,
                                             uv=self._slot_records)
                       if self.is_stofs_mode and self._tsuv1_path else None)
             if ops_ts is not None and self._slot_records:
                 self._ts_interp = "ops+surfT-mask" if self._ts_mask_fallback else "ops"
                 return self._write_3d_ops(per_time, *ops_ts)
+            if ops_ts is None and self._daily_3z:
+                # The per-file loop below reads one variable per file and would write wrong times. MJ (11/17/26)
+                log.error("RTOFS daily 3D: the TSUV-based T/S path is unavailable and the per-file "
+                          "fallback does not handle split daily files; no TEM/SAL/uv 3D files written")
+                return []
             if ops_ts is not None:
                 all_temp, all_salt = ops_ts
             self._ts_interp = (
@@ -2882,8 +2916,10 @@ class RTOFSProcessor(ForcingProcessor):
         n_bnd = len(self._bnd_lons)
         out = []
         series = {}
+        smooth = bool(self.config.obc_time_smoothing)
         for name, lst in (("t", all_temp), ("s", all_salt), ("u", all_u), ("v", all_v)):
-            series[name] = resample_records(np.stack(lst), times, self.config.obc_dt, n)
+            rec = resample_records(np.stack(lst), times, self.config.obc_dt, n + 1 if smooth else n)
+            series[name] = _average_pairs(rec) if smooth else rec
         for fname, key, var, units in (("TEM_3D.th.nc", "t", "temperature", "degC"),
                                        ("SAL_3D.th.nc", "s", "salinity", "PSU")):
             path = self.output_path / fname

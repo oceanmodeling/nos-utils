@@ -1556,9 +1556,10 @@ class NWMProcessor(ForcingProcessor):
         missing = [fix for out, fix in self._ops_river_fix.items() if found[out] is None]
         if missing:
             raise FileNotFoundError(
-                f"required STOFS-3D-ATL river FIX file(s) {', '.join(missing)} not found in "
-                f"{[str(d) for d in self._fix_search_dirs()]} "
-                f"(stage them with tools/fetch_stofs_3d_atl_fix.sh)")
+                f"required river FIX file(s) {', '.join(missing)} not found in "
+                f"{[str(d) for d in self._fix_search_dirs()]}"
+                + (" (stage them with tools/fetch_stofs_3d_atl_fix.sh)"
+                   if not getattr(self.config, "river_ops_static_names", None) else ""))
 
         cfg = self.river_config
         n_src = cfg.n_rivers

@@ -752,6 +752,7 @@ class NudgingProcessor(ForcingProcessor):
             file_groups = [[f] for f in files_3d]
 
         for group in file_groups:
+            datasets = []
             try:
                 datasets = [Dataset(str(f)) for f in group]
                 ds_main = datasets[0]
@@ -760,7 +761,6 @@ class NudgingProcessor(ForcingProcessor):
                 depth_var = ds_main.variables.get("Depth") or ds_main.variables.get("lev")
 
                 if lon is None or lat is None:
-                    for ds in datasets: ds.close()
                     continue
 
                 lon_arr = lon[:]
@@ -882,9 +882,11 @@ class NudgingProcessor(ForcingProcessor):
                 for k in range(n_appended):
                     all_times.append(file_t0 + k * rtofs_dt_input)
 
-                for ds in datasets: ds.close()
             except Exception as e:
                 log.warning(f"Failed to read RTOFS 3D group {group[0].name}: {e}")
+            finally:
+                for ds in datasets:
+                    ds.close()
 
         if not all_temp and not all_salt:
             return ForcingResult(
@@ -909,6 +911,9 @@ class NudgingProcessor(ForcingProcessor):
             n_target = int(np.ceil(sim_duration / target_dt - 1e-9)) + 1
         else:
             n_target = int(sim_duration / target_dt) + 1
+        # The 2-step average below drops one record; build one extra so the output keeps the count the run needs. MJ (11/17/26)
+        if getattr(self.config, "nudging_time_smoothing", False):
+            n_target += 1
         target_times = (np.arange(n_target) * target_dt).astype(np.float64)
 
         # Sanity-clamp to the input window: if RTOFS files don't reach
@@ -946,7 +951,8 @@ class NudgingProcessor(ForcingProcessor):
                 # Clip target_times to the actual RTOFS coverage so we
                 # never extrapolate past the last file.
                 tt = target_times[target_times <= rt[-1]]
-                if ops_tl:
+                # Smoothing needs its extra record even past the RTOFS coverage; the last state is held. MJ (11/17/26)
+                if ops_tl or getattr(self.config, "nudging_time_smoothing", False):
                     # SCHISM needs the full record count: write the whole axis, holding the last RTOFS state. MJ (10/02/26)
                     tt = target_times
                     if rt[-1] < target_times[-1] and not hold_warnings:

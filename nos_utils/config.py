@@ -485,6 +485,8 @@ class ForcingConfig:
             raise ValueError(f"lon_min ({self.lon_min}) must be < lon_max ({self.lon_max})")
         if self.lat_min >= self.lat_max:
             raise ValueError(f"lat_min ({self.lat_min}) must be < lat_max ({self.lat_max})")
+        if self.st_lawrence_enabled and self.river_ob_clim_enabled:
+            raise ValueError("st_lawrence and river ob_clim both write flux.th and TEM_1.th; enable only one")
         # grid_file is needed for igrd_met > 0 (met interpolation) or RTOFS OBC
         # Don't raise error here — it's resolved later by nco_bridge from FIXofs
 
@@ -817,7 +819,7 @@ class ForcingConfig:
             ufs_datm_tasks=120,
             ufs_schism_tasks=3952,
             ufs_total_tasks=4072,
-            ufs_nhours_fcst=108,
+            ufs_nhours_fcst=72,
             ufs_dt_atmos=720,
         )
         defaults.update(overrides)
@@ -1029,7 +1031,8 @@ class ForcingConfig:
         if _adt_wt is None and str(_sys.get("name", "")).startswith("stofs_3d_atl"):
             _adt_wt = "stofs_3d_atl_ufs.adt_weight.nc"
         _adt_wt = Path(_adt_wt) if _adt_wt else None
-        _adt_off = float(adt.get("datum_offset", -0.45)) if isinstance(adt, dict) else -0.45
+        _adt_off = adt.get("datum_offset") if isinstance(adt, dict) else None
+        _adt_off = -0.45 if _adt_off is None else float(_adt_off)
 
         # Ops river inputs (static FIX source_sink.in / msource.th / vsink.th, ops source
         # order): STOFS-3D-ATL by name (the coupled executable now has PREC_EVAP), yaml
@@ -1044,6 +1047,11 @@ class ForcingConfig:
         if _names is not None:
             if not isinstance(_names, dict) or not all(isinstance(v, str) for v in _names.values()):
                 raise ValueError("forcing.river.ops_static_names must map staged names to FIX names")
+            _need = {"source_sink.in", "msource.th", "vsink.th"}
+            if set(_names) != _need:
+                raise ValueError(
+                    "forcing.river.ops_static_names must map exactly source_sink.in, msource.th and "
+                    f"vsink.th to FIX file names, got {sorted(_names)}")
             kwargs_river_names = {str(k): str(v) for k, v in _names.items()}
         else:
             kwargs_river_names = None
@@ -1134,11 +1142,11 @@ class ForcingConfig:
         obc = obc if isinstance(obc, dict) else {}
         nudge = nudge if isinstance(nudge, dict) else {}
         kwargs["rtofs_daily_3z"] = _strict_bool(ocean.get("rtofs_daily_3z"), "ocean.rtofs_daily_3z", False)
-        kwargs["obc_dt"] = float(obc.get("dt", 21600.0))
+        kwargs["obc_dt"] = float(21600.0 if obc.get("dt") is None else obc["dt"])
         kwargs["obc_slot_discovery"] = _strict_bool(obc.get("slot_discovery"), "obc.slot_discovery", False)
         kwargs["obc_slot_records"] = _strict_bool(obc.get("slot_records"), "obc.slot_records", False)
         kwargs["obc_time_smoothing"] = _strict_bool(obc.get("time_smoothing"), "obc.time_smoothing", False)
-        kwargs["nudging_dt"] = float(nudge.get("dt", 10800.0))
+        kwargs["nudging_dt"] = float(10800.0 if nudge.get("dt") is None else nudge["dt"])
         kwargs["nudging_time_smoothing"] = _strict_bool(nudge.get("time_smoothing"), "nudging.time_smoothing", False)
 
         surf_res = ocean.get("surface_restore")
