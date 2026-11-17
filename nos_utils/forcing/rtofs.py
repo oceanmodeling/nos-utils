@@ -838,14 +838,14 @@ class RTOFSProcessor(ForcingProcessor):
             # the required outputs together, so len(output_files) > 0
             # alone cannot distinguish "the full required set produced"
             # from "some subset of it produced".
-            if region and not (elev2d_ok and obc3d_ok):
+            if (region or self._slot_records) and not (elev2d_ok and obc3d_ok):
                 produced_names = {p.name for p in output_files}
                 required = ("elev2D.th.nc",) + self.REQUIRED_3D_OBC_FILES
                 missing = [n for n in required if n not in produced_names]
                 return ForcingResult(
                     success=False, source=self.SOURCE_NAME,
                     errors=[
-                        f"rtofs_3d_region={region!r}: the 2D elevation "
+                        f"{'rtofs_3d_region=' + repr(region) if region else 'slot records'}: the 2D elevation "
                         f"boundary and the full 3D T/S boundary "
                         f"(TEM_3D.th.nc, SAL_3D.th.nc) are all required; "
                         f"missing {missing} -- refusing to report success "
@@ -1066,9 +1066,13 @@ class RTOFSProcessor(ForcingProcessor):
                 for ds in datasets[1:]:
                     subset.update(self._stofs_subset_roi(ds, roi, ["temperature", "salinity", "u", "v"]))
 
-                missing = [k for k in ("temperature", "salinity", "u", "v") if k not in subset]
-                if missing:
-                    log.warning(f"3D group {group[0].name} lacks {missing}; skipped")
+                if self._daily_3z:
+                    # Split daily files: a group short of a variable is skipped, not half-appended. MJ (11/17/26)
+                    missing = [k for k in ("temperature", "salinity", "u", "v") if k not in subset]
+                    if missing:
+                        log.warning(f"3D group {group[0].name} lacks {missing}; skipped")
+                        continue
+                elif "temperature" not in subset:
                     continue
 
                 for t in range(subset["temperature"].shape[0]):
@@ -2263,7 +2267,9 @@ class RTOFSProcessor(ForcingProcessor):
             )
 
             # Apply 2-step temporal moving average if configured
-            if getattr(self.config, "obc_time_smoothing", False) and ssh_array.shape[0] > 1:
+            # The slot writers already do the ops-style daily smoothing; adjacent model steps are not ops. MJ (11/17/26)
+            if (getattr(self.config, "obc_time_smoothing", False) and not self._slot_records
+                    and ssh_array.shape[0] > 1):
                 ssh_array = (ssh_array[:-1] + ssh_array[1:]) / 2.0
                 time_axis = time_axis[:ssh_array.shape[0]]
                 log.info(f"elev2D: applied 2-step temporal smoothing, resulting in {ssh_array.shape[0]} steps")
@@ -2668,6 +2674,8 @@ class RTOFSProcessor(ForcingProcessor):
                 # The per-file loop below reads one variable per file and would write wrong times. MJ (11/17/26)
                 log.error("RTOFS daily 3D: the TSUV-based T/S path is unavailable and the per-file "
                           "fallback does not handle split daily files; no TEM/SAL/uv 3D files written")
+                for stale in ("TEM_3D.th.nc", "SAL_3D.th.nc", "uv3D.th.nc"):
+                    (self.output_path / stale).unlink(missing_ok=True)
                 return []
             if ops_ts is not None:
                 all_temp, all_salt = ops_ts

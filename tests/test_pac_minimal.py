@@ -495,3 +495,52 @@ class TestNudgingSmoothedCounts:
     @pytest.mark.parametrize("phase,n", [("nowcast", 2), ("forecast", 3)])
     def test_unsmoothed_counts_are_unchanged(self, tmp_path, phase, n):
         assert _nudge_counts(tmp_path, phase, False) == n
+
+
+class TestFollowUps:
+    def test_non_daily_tsuv_does_not_silently_skip_a_group(self, tmp_path, caplog):
+        files = _tsuv_files(tmp_path)
+        bad = tmp_path / "rtofs_glo_3dz_f012_6hrly_hvr_US_east.nc"
+        with Dataset(bad, "w") as d:
+            d.createDimension("MT", 1); d.createDimension("Depth", 3)
+            d.createDimension("Y", 5); d.createDimension("X", 6)
+            d.createVariable("Depth", "f4", ("Depth",))[:] = [0, 10, 20]
+            d.createVariable("Longitude", "f4", ("Y", "X"))[:] = np.tile(np.arange(6.), (5, 1)) - 70
+            d.createVariable("Latitude", "f4", ("Y", "X"))[:] = np.tile(np.arange(5.)[:, None], (1, 6)) + 30
+            for v in ("temperature", "salinity", "v"):
+                d.createVariable(v, "f4", ("MT", "Depth", "Y", "X"))[:] = 1.0
+        cfg = _cfg("stofs_3d_atl")
+        cfg.obc_roi_3d = {"x1": 0, "x2": 4, "y1": 0, "y2": 3}
+        proc = RTOFSProcessor(cfg, tmp_path, tmp_path / "out")
+        with pytest.raises(IndexError):
+            proc._stofs_prepare_tsuv([files[0], bad, files[1]], tmp_path)
+        assert "skipped" not in caplog.text
+
+    def test_daily_fallback_removes_stale_files_and_prep_fails(self, tmp_path):
+        p = RTOFSProcessor(_cfg("stofs_3d_pac"), tmp_path, tmp_path / "out")
+        p.output_path.mkdir(parents=True)
+        for n in ("TEM_3D.th.nc", "SAL_3D.th.nc", "uv3D.th.nc"):
+            (p.output_path / n).write_bytes(b"old")
+        p._bnd_lons = np.array([150.0]); p._bnd_lats = np.array([0.0])
+        assert p._process_3d([tmp_path / "rtofs_glo_3dz_n024_daily_3ztio.nc"]) == []
+        assert not [n for n in ("TEM_3D.th.nc", "SAL_3D.th.nc", "uv3D.th.nc") if (p.output_path / n).exists()]
+
+    def test_required_set_check_covers_slot_records(self):
+        import inspect
+        src = inspect.getsource(RTOFSProcessor._process_stofs)
+        assert "(region or self._slot_records) and not (elev2d_ok and obc3d_ok)" in src
+
+    @pytest.mark.parametrize("slot,n_expected", [(True, 5), (False, 4)])
+    def test_fallback_elev2d_smoothing_skipped_for_slot_records(self, tmp_path, slot, n_expected):
+        from tests.test_obc_ops_timeline import _ops_proc
+        cfg, proc, files = _ops_proc(tmp_path, "nowcast", obc_time_smoothing=True,
+                                     obc_ops_timeline=False, obc_slot_records=slot)
+        proc._ssh1_path = None
+        out = proc._process_2d(files)
+        with Dataset(out) as d:
+            n_on = d["time_series"].shape[0]
+        cfg.obc_time_smoothing = False
+        out = proc._process_2d(files)
+        with Dataset(out) as d:
+            n_off = d["time_series"].shape[0]
+        assert n_on == (n_off if slot else n_off - 1)
