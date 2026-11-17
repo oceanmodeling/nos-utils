@@ -577,3 +577,79 @@ class RiverClimProcessor(ForcingProcessor):
             log.error(f"Failed to create tar: {e}")
 
         return output_files
+
+
+# stofs_3d_pac_create_river_forcing_ob.sh: 4 daily rows, time column replaced by 0..3 days. MJ (11/16/26)
+OB_CLIM_ROWS = 4
+OB_CLIM_DT_S = 86400.0
+
+
+def ob_clim_rows(lines: List[str], day0: int) -> List[List[str]]:
+    """Four rows of a Pacific boundary climatology file starting at day-of-year ``day0``.
+
+    ``lines`` is the whole file, header first. Ops runs awk ``NR >= day0 && NR < day0 + 4`` with the
+    header as NR 1, so it takes the data rows Seq day0-1 .. day0+2. On day0 = 1 that selection starts
+    on the header, which ops writes out as a row; here the first four data rows are used instead.
+    MJ (11/16/26)
+    """
+    if day0 == 1:
+        log.warning("river climatology: day-of-year 1 would select the header line (ops quirk); "
+                    "using the first four data rows")
+        picked = [ln for ln in lines if ln.strip() and not ln.lstrip().startswith("#")][:OB_CLIM_ROWS]
+    else:
+        picked = lines[day0 - 1:day0 - 1 + OB_CLIM_ROWS]
+    rows = [ln.split() for ln in picked if ln.strip()]
+    if len(rows) < OB_CLIM_ROWS:
+        raise ValueError(f"climatology has {len(rows)} rows from day {day0}, need {OB_CLIM_ROWS}")
+    if any(r[0].startswith("#") for r in rows):
+        raise ValueError(f"climatology rows from day {day0} include the header")
+    return rows
+
+
+def ob_clim_text(lines: List[str], day0: int) -> str:
+    """flux.th / TEM_1.th text: time 0, 1, 2, 3 days then the file's own value tokens."""
+    rows = ob_clim_rows(lines, day0)
+    return "".join(
+        " ".join([f"{k * OB_CLIM_DT_S:.3f}"] + r[1:]) + "\n" for k, r in enumerate(rows))
+
+
+class RiverOBClimProcessor(ForcingProcessor):
+    """flux.th and TEM_1.th for the flow-only river boundaries from day-of-year text climatology.
+
+    Ports the climatology block of stofs_3d_pac_create_river_forcing_ob.sh. ``input_path`` is the
+    fix directory holding the discharge and temperature files (one ``# Seq ...`` header, then
+    ``seq q1..qN``). The day-of-year is that of the nowcast begin date (cycle - nowcast_hours).
+    MJ (11/16/26)
+    """
+
+    SOURCE_NAME = "RIVER_OB_CLIM"
+
+    def _day0(self) -> int:
+        cycle = datetime.strptime(self.config.pdy, "%Y%m%d") + timedelta(hours=self.config.cyc)
+        return (cycle - timedelta(hours=self.config.nowcast_hours)).timetuple().tm_yday
+
+    def _files(self):
+        return (("flux.th", self.input_path / self.config.river_ob_clim_discharge_file),
+                ("TEM_1.th", self.input_path / self.config.river_ob_clim_temperature_file))
+
+    def find_input_files(self) -> List[Path]:
+        return [p for _, p in self._files() if p.is_file()]
+
+    def process(self) -> ForcingResult:
+        self.create_output_dir()
+        day0 = self._day0()
+        outputs, errors = [], []
+        for out_name, src in self._files():
+            try:
+                text = ob_clim_text(src.read_text().splitlines(), day0)
+            except (OSError, ValueError) as e:
+                errors.append(f"{out_name} from {src}: {e}")
+                continue
+            dst = self.output_path / out_name
+            dst.write_text(text)
+            outputs.append(dst)
+        if errors:
+            return ForcingResult(success=False, source=self.SOURCE_NAME, errors=errors)
+        log.info(f"River boundary climatology: day-of-year {day0}, {OB_CLIM_ROWS} rows")
+        return ForcingResult(success=True, source=self.SOURCE_NAME, output_files=outputs,
+                             metadata={"day_of_year": day0})

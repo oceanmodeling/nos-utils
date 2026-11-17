@@ -305,6 +305,9 @@ class PrepOrchestrator:
                 )
             results.append(self._run_st_lawrence(output_dir))
 
+        if self.config.river_ob_clim_enabled:
+            results.append(self._run_river_ob_clim(output_dir))
+
         # GFS-Wave boundary spectra (WW3 nest.ww3): independent of
         # GFS/HRRR/NWM/RTOFS, only needs its own COMINgfswave tree.
         if self.config.waves_enabled and "gfswave" in self.paths:
@@ -571,6 +574,13 @@ class PrepOrchestrator:
             phase=phase, time_hotstart=time_hotstart, **extra,
         )
         return proc.process()
+
+    def _run_river_ob_clim(self, output_dir: Path) -> ForcingResult:
+        """Boundary-river flux.th / TEM_1.th from the fix-dir climatology (STOFS-3D-PAC)."""
+        from .forcing.river_clim import RiverOBClimProcessor
+
+        fix = Path(self.paths["fix"]) if "fix" in self.paths else output_dir / "_no_fix"
+        return RiverOBClimProcessor(self.config, fix, output_dir).process()
 
     def _run_st_lawrence(self, output_dir: Path) -> ForcingResult:
         """St. Lawrence River: Canadian hydrometric CSV + GFS-rad temperature.
@@ -1409,7 +1419,8 @@ class PrepOrchestrator:
         """
         import shutil
 
-        if not getattr(self.config, "st_lawrence_enabled", False):
+        if not (getattr(self.config, "st_lawrence_enabled", False)
+                or getattr(self.config, "river_ob_clim_enabled", False)):
             return
 
         prefix = self.run_name
