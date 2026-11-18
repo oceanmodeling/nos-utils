@@ -8,7 +8,7 @@ The caller provides values directly or uses factory methods.
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 log = logging.getLogger(__name__)
 
@@ -242,7 +242,10 @@ class ForcingConfig:
     obc_sal_outside: float = 33.0
     # ADT satellite SSH blending (STOFS-3D-ATL uses CMEMS ADT to correct boundary SSH)
     adt_enabled: bool = False
-    adt_datum_offset: float = -0.45
+    # Per-system: from_yaml requires forcing.ocean.adt.datum_offset when ADT is enabled. MJ (11/18/26)
+    adt_datum_offset: float = 0.0
+    # ADT subset box (lon_min, lon_max, lat_min, lat_max); None uses the SSH_1 extent. MJ (11/18/26)
+    adt_roi: Optional[Tuple[float, float, float, float]] = None
     # Rerun archive/tar also carries temnu/salnu/surface_restore with the Pacific names; off keeps main's set. MJ (10/24/26)
     obc_archive_extended: bool = False
     # Ops ESMF map for the ADT regrid (yaml ocean.adt.weight_file); a bare name resolves against
@@ -614,10 +617,12 @@ class ForcingConfig:
             adt_enabled=True,
             adt_datum_offset=-0.45,
             adt_weight_file=Path("stofs_3d_atl_ufs.adt_weight.nc"),
+            adt_roi=(-62.5, -51.5, 7.0, 54.0),
             obc_ssh_hold_first_record=True,
             obc_ops_timeline=True,
             # Nudging
             nudging_enabled=True,
+            nudging_dt=21600.0,
             nudging_timescale_seconds=86400.0,
             # NWM river settings (medium_range_mem1, 121 target files)
             nwm_product="medium_range_mem1",
@@ -679,9 +684,11 @@ class ForcingConfig:
             adt_enabled=True,
             adt_datum_offset=-0.45,
             adt_weight_file=Path("stofs_3d_atl_ufs.adt_weight.nc"),
+            adt_roi=(-62.5, -51.5, 7.0, 54.0),
             obc_ssh_hold_first_record=True,
             obc_ops_timeline=True,
             nudging_enabled=True,
+            nudging_dt=21600.0,
             nudging_timescale_seconds=86400.0,
             nwm_product="medium_range_mem1",
             nwm_n_list_target=121,
@@ -979,11 +986,9 @@ class ForcingConfig:
         # Only the ATL ops chain holds elev2D at its first record. MJ (10/02/26)
         _hold = obc.get("ssh_hold_first_record") if isinstance(obc, dict) else None
         _sys = data.get("system", {}) if isinstance(data.get("system"), dict) else {}
-        _hold = _strict_bool(_hold, "obc.ssh_hold_first_record",
-                             str(_sys.get("name", "")).startswith("stofs_3d_atl"))
+        _hold = _strict_bool(_hold, "obc.ssh_hold_first_record", False)
         _ops_tl = obc.get("ops_timeline") if isinstance(obc, dict) else None
-        _ops_tl = _strict_bool(_ops_tl, "obc.ops_timeline",
-                               str(_sys.get("name", "")).startswith("stofs_3d_atl"))
+        _ops_tl = _strict_bool(_ops_tl, "obc.ops_timeline", False)
         if obc_elev_segments is not None:
             obc_elev_segments = [int(i) for i in obc_elev_segments]
 
@@ -1002,11 +1007,9 @@ class ForcingConfig:
         # HRRR blend domain (may differ from main domain)
         hrrr_blend = atm.get("hrrr_blend", {})
 
-        # Ops atmospheric parity: STOFS-3D-ATL, standalone (nws=2) and coupled (nws=4, the DATM path
-        # feeds from the same GFS/HRRR processors); other systems keep the defaults. The yaml keys
-        # forcing.atmospheric.gfs.ops_timeline / hrrr.rotate_winds / hrrr.small_grib /
-        # hrrr.blend_rotate_winds override the name rule. MJ (10/03/26)
-        _ops_sflux = str(_sys.get("name", "")).startswith("stofs_3d_atl")
+        # Ops atmospheric parity is opt-in per system: forcing.atmospheric.gfs.ops_timeline,
+        # hrrr.rotate_winds / blend_rotate_winds / blend_weight / small_grib. MJ (11/18/26)
+        _ops_sflux = False
         _gfs_ops_tl = _strict_bool(
             atm.get("gfs", {}).get("ops_timeline") if isinstance(atm.get("gfs"), dict) else None,
             "forcing.atmospheric.gfs.ops_timeline", _ops_sflux)
@@ -1028,19 +1031,25 @@ class ForcingConfig:
         adt = ocean.get("adt", {}) if isinstance(ocean, dict) else {}
         _sys = data.get("system", {}) if isinstance(data.get("system"), dict) else {}
         _adt_wt = adt.get("weight_file") if isinstance(adt, dict) else None
-        if _adt_wt is None and str(_sys.get("name", "")).startswith("stofs_3d_atl"):
-            _adt_wt = "stofs_3d_atl_ufs.adt_weight.nc"
         _adt_wt = Path(_adt_wt) if _adt_wt else None
         _adt_off = adt.get("datum_offset") if isinstance(adt, dict) else None
-        _adt_off = -0.45 if _adt_off is None else float(_adt_off)
+        _adt_on = bool(adt.get("enabled", False)) if isinstance(adt, dict) else False
+        if _adt_off is None and _adt_on:
+            raise ValueError("forcing.ocean.adt.datum_offset is required when ADT is enabled")
+        _adt_off = 0.0 if _adt_off is None else float(_adt_off)
+        _adt_roi = adt.get("roi") if isinstance(adt, dict) else None
+        if _adt_roi is not None:
+            if not isinstance(_adt_roi, (list, tuple)) or len(_adt_roi) != 4:
+                raise ValueError("forcing.ocean.adt.roi must be [lon_min, lon_max, lat_min, lat_max]")
+            _adt_roi = tuple(float(v) for v in _adt_roi)
+            if not (_adt_roi[0] < _adt_roi[1] and _adt_roi[2] < _adt_roi[3]):
+                raise ValueError("forcing.ocean.adt.roi must have lon_min < lon_max and lat_min < lat_max")
 
         # Ops river inputs (static FIX source_sink.in / msource.th / vsink.th, ops source
-        # order): STOFS-3D-ATL by name (the coupled executable now has PREC_EVAP), yaml
-        # forcing.river.ops_static_files overrides. MJ (10/03/26)
+        # order): opt-in via yaml forcing.river.ops_static_files. MJ (11/18/26)
         _river_ops = _strict_bool(
             river.get("ops_static_files") if isinstance(river, dict) else None,
-            "forcing.river.ops_static_files",
-            str(_sys.get("name", "")).startswith("stofs_3d_atl"))
+            "forcing.river.ops_static_files", False)
 
         _river_d = river if isinstance(river, dict) else {}
         _names = _river_d.get("ops_static_names")
@@ -1109,6 +1118,7 @@ class ForcingConfig:
             hrrr_small_grib=_hrrr_sg,
             adt_enabled=adt.get("enabled", False) if isinstance(adt, dict) else False,
             adt_datum_offset=_adt_off,
+            adt_roi=_adt_roi,
             adt_weight_file=_adt_wt,
             nwm_product=nwm_product,
             river_ops_static=_river_ops,
@@ -1286,11 +1296,10 @@ class ForcingConfig:
                 kwargs["dynamic_adjust_enabled"] = obc_dyn
                 kwargs["obc_min_timesteps"] = 21 if obc_dyn else 0
 
-        # ATL production bad-day checks by name; prep.ops_bad_day_checks overrides. MJ (10/05/26)
+        # ATL production bad-day checks: opt-in via prep.ops_bad_day_checks. MJ (11/18/26)
         kwargs["ops_bad_day_checks"] = _strict_bool(
             prep.get("ops_bad_day_checks") if isinstance(prep, dict) else None,
-            "prep.ops_bad_day_checks",
-            str(_sys.get("name", "")).startswith("stofs_3d_atl"))
+            "prep.ops_bad_day_checks", False)
         if isinstance(prep, dict) and prep.get("restart_min_bytes") is not None:
             kwargs["restart_min_bytes"] = int(prep["restart_min_bytes"])
 

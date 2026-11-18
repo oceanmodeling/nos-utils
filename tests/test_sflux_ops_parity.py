@@ -425,6 +425,11 @@ class TestHrrrWindRotation:
         assert "-small_grib" not in first and "-grib" in first
 
 
+ATL_ATM = ("forcing:\n  atmospheric:\n    gfs:\n      ops_timeline: true\n    hrrr:\n"
+           "      rotate_winds: false\n      blend_rotate_winds: false\n      blend_weight: 0.99\n"
+           "      small_grib: true\n")
+
+
 def _yaml_cfg(tmp_path, name, mode=None, atm=""):
     yaml = pytest.importorskip("yaml")
     body = {"system": {"name": name},
@@ -452,12 +457,12 @@ class TestConfigGating:
             assert other.hrrr_small_grib is False and other.datm_rotate_hrrr_winds is True
 
     def test_yaml_standalone_atl_follows_ops(self, tmp_path):
-        cfg = _yaml_cfg(tmp_path, "stofs_3d_atl_ufs", mode="standalone")
+        cfg = _yaml_cfg(tmp_path, "stofs_3d_atl_ufs", mode="standalone", atm=ATL_ATM)
         assert cfg.nws == 2 and cfg.gfs_ops_timeline is True and cfg.hrrr_rotate_winds is False
         assert cfg.hrrr_small_grib is True
 
     def test_yaml_coupled_atl_follows_ops_no_rotation(self, tmp_path):
-        cfg = _yaml_cfg(tmp_path, "stofs_3d_atl_ufs")
+        cfg = _yaml_cfg(tmp_path, "stofs_3d_atl_ufs", atm=ATL_ATM)
         assert cfg.nws == 4 and cfg.gfs_ops_timeline is True and cfg.hrrr_rotate_winds is False
         assert cfg.hrrr_small_grib is True and cfg.datm_rotate_hrrr_winds is False
 
@@ -553,7 +558,8 @@ def test_hrrr_blend_weight_gating(tmp_path):
     assert ForcingConfig.for_stofs_3d_atl_ufs(PDY, 12).datm_hrrr_weight == 0.99
     for other in (ForcingConfig.for_secofs(PDY, 12), ForcingConfig.for_stofs_3d_pac(PDY, 12)):
         assert other.datm_hrrr_weight == 1.0
-    assert _yaml_cfg(tmp_path, "stofs_3d_atl_ufs").datm_hrrr_weight == 0.99
+    assert _yaml_cfg(tmp_path, "stofs_3d_atl_ufs", atm=ATL_ATM).datm_hrrr_weight == 0.99
+    assert _yaml_cfg(tmp_path, "stofs_3d_atl_ufs").datm_hrrr_weight == 1.0
     for name in ("secofs_ufs", "stofs_3d_ak_ufs", "stofs_3d_pac_ufs"):
         assert _yaml_cfg(tmp_path, name).datm_hrrr_weight == 1.0
     atm = "forcing:\n  atmospheric:\n    hrrr:\n      blend_weight: 1.0\n"

@@ -92,16 +92,16 @@ class TestConfigFlag:
     def test_default_off(self):
         assert ForcingConfig(-90.0, -60.0, 20.0, 40.0, pdy="20261001", cyc=12).river_ops_static is False
 
-    def test_coupled_nws4_on_by_name(self, tmp_path):
+    def test_coupled_nws4_off_without_key(self, tmp_path):
         pytest.importorskip("yaml")
         p = tmp_path / "x.yaml"
         p.write_text("system:\n  name: stofs_3d_atl_ufs\nmodel:\n  physics:\n    nws: 4\n")
-        assert ForcingConfig.from_yaml(p, pdy="20261001", cyc=12).river_ops_static is True
+        assert ForcingConfig.from_yaml(p, pdy="20261001", cyc=12).river_ops_static is False
 
     @pytest.mark.parametrize("name,river,expected", [
-        ("stofs_3d_atl_ufs", "", True),
+        ("stofs_3d_atl_ufs", "", False),
         ("stofs_3d_atl_ufs", "ops_static_files: true", True),
-        ("stofs_3d_atl_ufs_standalone", "", True),
+        ("stofs_3d_atl_ufs_standalone", "", False),
         ("secofs_ufs", "", False),
         ("stofs_3d_ak_ufs", "", False),
         ("stofs_3d_atl_ufs", "ops_static_files: false", False),

@@ -48,12 +48,6 @@ try:
 except ImportError:
     HAS_NETCDF4 = False
 
-# Ops ADT subset ROI, used only when the SSH_1 destination grid cannot be read.
-# MJ (10/01/26)
-ADT_LON_MIN = -62.5
-ADT_LON_MAX = -51.5
-ADT_LAT_MIN = 7.0
-ADT_LAT_MAX = 54.0
 ADT_PAD = 1.0
 
 # Ops holds ADT-missing cells as the CMEMS int fill carried through float32. MJ (10/02/26)
@@ -149,7 +143,7 @@ class ADTBlender:
 
     def _dest_bounds(self, ssh_path: Path):
         """ADT subset (lon_min, lon_max, lat_min, lat_max): SSH_1 grid extent padded
-        by ADT_PAD, else the ops ROI (-180/180 systems) or the padded config domain (0-360). MJ (10/01/26)
+        by ADT_PAD, else config.adt_roi, else the padded config domain. MJ (11/18/26)
         """
         try:
             with Dataset(str(ssh_path)) as ds:
@@ -159,19 +153,15 @@ class ADTBlender:
                     float(np.nanmin(lat)) - ADT_PAD, float(np.nanmax(lat)) + ADT_PAD)
         except Exception as e:
             log.warning(f"Cannot read SSH_1 grid extent ({e}) — using the fallback ROI")
-            if self._pm180():
-                return ADT_LON_MIN, ADT_LON_MAX, ADT_LAT_MIN, ADT_LAT_MAX
+            if self.config.adt_roi:
+                return tuple(self.config.adt_roi)
             lon_min, lon_max, lat_min, lat_max = self.config.domain
             return lon_min - ADT_PAD, lon_max + ADT_PAD, lat_min - ADT_PAD, lat_max + ADT_PAD
 
-    def _pm180(self) -> bool:
-        from ..coords import lon_convention
-        return lon_convention(self.config) != "0360"
-
     def _roi(self, ssh_path):
-        """Ops fixed ROI for -180/180 systems (STOFS-3D-ATL); SSH_1 extent for the 0-360 Pacific. MJ (10/24/26)"""
-        if self._pm180():
-            return ADT_LON_MIN, ADT_LON_MAX, ADT_LAT_MIN, ADT_LAT_MAX
+        """Configured adt_roi (ATL ops box) when set, else the SSH_1 extent. MJ (11/18/26)"""
+        if self.config.adt_roi:
+            return tuple(self.config.adt_roi)
         return self._dest_bounds(ssh_path)
 
     def _find_adt_data(self) -> Optional[Path]:

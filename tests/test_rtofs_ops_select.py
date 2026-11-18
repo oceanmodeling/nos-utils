@@ -113,6 +113,7 @@ def test_ops_timeline_flag_is_atl_only(tmp_path):
     assert ForcingConfig.for_stofs_3d_atl_ufs(PDY, 12).obc_ops_timeline is True
     assert ForcingConfig.for_stofs_3d_pac(PDY, 12).obc_ops_timeline is False
     assert ForcingConfig.for_secofs(PDY, 12).obc_ops_timeline is False
-    assert _yaml_cfg(tmp_path, "stofs_3d_atl_ufs").obc_ops_timeline is True
+    assert _yaml_cfg(tmp_path, "stofs_3d_atl_ufs").obc_ops_timeline is False
+    assert _yaml_cfg(tmp_path, "stofs_3d_atl_ufs", "      ops_timeline: true\n").obc_ops_timeline is True
     assert _yaml_cfg(tmp_path, "stofs_3d_pac_ufs").obc_ops_timeline is False
     assert _yaml_cfg(tmp_path, "stofs_3d_atl_ufs", "      ops_timeline: false\n").obc_ops_timeline is False

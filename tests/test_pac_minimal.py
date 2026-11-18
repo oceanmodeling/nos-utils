@@ -439,7 +439,7 @@ class TestConfigValidation:
     def test_null_numeric_yaml_values_use_defaults(self, tmp_path):
         c = _yaml_cfg(tmp_path, {"ocean": {"obc": {"dt": None}, "nudging": {"dt": None},
                                            "adt": {"datum_offset": None}}})
-        assert c.obc_dt == 21600.0 and c.nudging_dt == 10800.0 and c.adt_datum_offset == -0.45
+        assert c.obc_dt == 21600.0 and c.nudging_dt == 10800.0 and c.adt_datum_offset == 0.0
 
     def test_pacific_ufs_forecast_hours(self):
         assert _cfg("stofs_3d_pac_ufs").ufs_nhours_fcst == 72

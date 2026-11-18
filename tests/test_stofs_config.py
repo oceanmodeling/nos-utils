@@ -169,7 +169,7 @@ class TestSTOFSFromYAML:
                         "timescale_days": 1.0,
                         "roi_3dz": {"x1": 422, "x2": 600, "y1": 94, "y2": 835},
                     },
-                    "adt": {"enabled": True},
+                    "adt": {"enabled": True, "datum_offset": -0.45},
                 },
                 "river": {
                     "primary": "nwm",
@@ -532,6 +532,9 @@ class TestPacificBranchKeepsExistingSystems:
         stofs = {"obc": {"roi_2ds": {"x1": 1, "x2": 2, "y1": 1, "y2": 2},
                          "roi_3dz": {"x1": 1, "x2": 2, "y1": 1, "y2": 2}},
                  "adt": {"enabled": True}}
+        with pytest.raises(ValueError, match="datum_offset"):
+            self._from_yaml(tmp_path, stofs)
+        stofs["adt"]["datum_offset"] = -0.45
         assert self._from_yaml(tmp_path, stofs).adt_datum_offset == -0.45
         assert ForcingConfig.for_stofs_3d_atl(pdy="20260401", cyc=12).adt_datum_offset == -0.45
         stofs["adt"]["datum_offset"] = -0.4715517
