@@ -346,6 +346,9 @@ class ForcingConfig:
     # fresh-water T/S), vsource.th in ops format. A missing FIX file fails the NWM step.
     # MJ (10/03/26)
     river_ops_static: bool = False
+    # forcing.river.enabled: governs the NWM point-source rivers only (ob_clim has its own switch);
+    # off skips the NWM step and its critical-source check. MJ (11/18/26)
+    nwm_enabled: bool = True
     # Staged name -> FIX name for river_ops_static; None keeps the STOFS-3D-ATL names. MJ (11/16/26)
     river_ops_static_names: Optional[Dict[str, str]] = None
     # Text climatology for the flow-only river boundaries (STOFS-3D-PAC): flux.th and TEM_1.th from
@@ -748,6 +751,7 @@ class ForcingConfig:
             obc_ssh_offset=0.0,
             adt_enabled=True,
             adt_datum_offset=-0.4715517,
+            nwm_enabled=False,
             nudging_enabled=True,
             nudging_timescale_seconds=86400.0,
             nwm_product="medium_range_mem1",
@@ -796,6 +800,7 @@ class ForcingConfig:
             obc_ssh_offset=0.0,
             adt_enabled=True,
             adt_datum_offset=-0.4715517,
+            nwm_enabled=False,
             nudging_enabled=True,
             nudging_timescale_seconds=86400.0,
             nwm_product="medium_range_mem1",
@@ -1124,6 +1129,9 @@ class ForcingConfig:
             adt_weight_file=_adt_wt,
             nwm_product=nwm_product,
             river_ops_static=_river_ops,
+            nwm_enabled=_strict_bool(
+                river.get("enabled") if isinstance(river, dict) else None,
+                "forcing.river.enabled", True),
             river_ops_static_names=kwargs_river_names,
             river_ob_clim_enabled=_strict_bool(
                 _ob.get("enabled"), "forcing.river.ob_clim.enabled", False),

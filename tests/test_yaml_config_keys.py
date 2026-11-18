@@ -153,3 +153,61 @@ def test_ops_timeline_requires_nudging_dt(tmp_path):
 def test_adt_enabled_string_false_is_false(tmp_path):
     body = "system: {name: x}\nforcing:\n  ocean:\n    adt: {enabled: 'false'}\n"
     assert _load(tmp_path, body).adt_enabled is False
+
+
+def _scheduled(tmp_path, monkeypatch, cfg, run_name):
+    from nos_utils.forcing.base import ForcingResult
+    from nos_utils.orchestrator import PrepOrchestrator
+    calls = []
+
+    def stub(name):
+        def f(self, *a, **k):
+            calls.append(name)
+            return ForcingResult(success=True, source=name.upper())
+        return f
+
+    for n in ("hotstart", "gfs", "hrrr", "nwm", "tidal", "rtofs", "nudging", "river_ob_clim",
+              "st_lawrence", "dynamic_adjust", "surface_restore", "param_nml", "datm",
+              "ufs_config", "wave_boundary"):
+        monkeypatch.setattr(PrepOrchestrator, "_run_" + n, stub(n), raising=False)
+    monkeypatch.setattr(PrepOrchestrator, "_write_time_markers", lambda *a, **k: None, raising=False)
+    paths = {"output": tmp_path / "out", "nwm": tmp_path / "nwm", "gfs": tmp_path / "gfs",
+             "hrrr": tmp_path / "hrrr"}
+    res = PrepOrchestrator(cfg, paths, run_name=run_name, skip_legacy=False).run("nowcast")
+    return calls, res
+
+
+@pytest.mark.parametrize("enabled,run_name", [
+    (True, "stofs_3d_atl_ufs"), (True, "secofs_ufs"), (False, "stofs_3d_pac_ufs")])
+def test_nwm_scheduled_only_when_enabled(tmp_path, monkeypatch, enabled, run_name):
+    cfg = ForcingConfig.for_stofs_3d_atl_ufs(PDY, 12, nwm_enabled=enabled)
+    assert ("nwm" in _scheduled(tmp_path, monkeypatch, cfg, run_name)[0]) is enabled
+
+
+def test_disabled_nwm_is_not_a_critical_failure(tmp_path, monkeypatch):
+    cfg = ForcingConfig.for_stofs_3d_atl_ufs(PDY, 12, nwm_enabled=False, ops_bad_day_checks=False,
+                                             critical_sources=["GFS", "NWM", "TIDAL"])
+    calls, res = _scheduled(tmp_path, monkeypatch, cfg, "stofs_3d_pac_ufs")
+    assert "nwm" not in calls and res.success
+
+
+def test_secofs_preset_schedules_nwm(tmp_path, monkeypatch):
+    assert "nwm" in _scheduled(tmp_path, monkeypatch, ForcingConfig.for_secofs(PDY, 12), "secofs")[0]
+
+
+@pytest.mark.parametrize("val,expect", [("true", True), ("false", False), (None, True)])
+def test_river_enabled_parses(tmp_path, val, expect):
+    river = "" if val is None else "  river: {enabled: %s}\n" % val
+    assert _load(tmp_path, "system: {name: x}\nforcing:\n" + river + "  tidal: {}\n").nwm_enabled is expect
+
+
+def test_river_disabled_with_ob_clim_enabled_is_valid(tmp_path):
+    c = _load(tmp_path, "system: {name: x}\nforcing:\n  river:\n    enabled: false\n    ob_clim: {enabled: true}\n")
+    assert c.nwm_enabled is False and c.river_ob_clim_enabled is True
+
+
+@pytest.mark.parametrize("factory", ["for_stofs_3d_pac", "for_stofs_3d_pac_ufs"])
+def test_pacific_presets_disable_nwm(factory):
+    assert getattr(ForcingConfig, factory)(PDY, 12).nwm_enabled is False
+    assert ForcingConfig.for_stofs_3d_atl(PDY, 12).nwm_enabled is True
+    assert ForcingConfig.for_secofs(PDY, 12).nwm_enabled is True

@@ -268,7 +268,9 @@ class PrepOrchestrator:
         if "hrrr" in self.paths and self.config.met_num >= 2:
             parallel_tasks["HRRR"] = lambda: self._run_hrrr(output_dir, phase, time_hotstart)
 
-        if "nwm" in self.paths and (self.is_stofs or not self.skip_legacy):
+        if not self.config.nwm_enabled:
+            log.info("NWM river disabled by forcing.river.enabled")
+        elif "nwm" in self.paths and (self.is_stofs or not self.skip_legacy):
             parallel_tasks["NWM"] = lambda: self._run_nwm(output_dir, phase, time_hotstart)
         elif self.skip_legacy:
             log.info("Skipping NWM river (handled by legacy shell)")
@@ -378,6 +380,8 @@ class PrepOrchestrator:
 
         if declared is not None:
             critical_sources = set(declared)
+            if not self.config.nwm_enabled:
+                critical_sources.discard("NWM")
             log.info(f"Critical prep sources (declared): {sorted(critical_sources)}")
 
             # A stage is only created when its input path is present
@@ -405,7 +409,7 @@ class PrepOrchestrator:
             # `prep.critical_sources` is the single switch that tightens it.
             critical_sources = {"GFS", "PARAM_NML", "TIDAL"}
             if self.is_stofs:
-                critical_sources.update({"NWM", "RTOFS"})
+                critical_sources.update({"NWM", "RTOFS"} if self.config.nwm_enabled else {"RTOFS"})
             log.info(f"Critical prep sources (heuristic): {sorted(critical_sources)}")
 
             failed_critical = sorted(critical_sources & failed)
