@@ -1,7 +1,5 @@
 """System-specific values live in yaml/presets, not in system-name tests. MJ (11/18/26)"""
 
-from pathlib import Path
-
 import numpy as np
 import pytest
 
@@ -142,3 +140,16 @@ def test_nudging_step_comes_from_config_not_the_ops_flag(tmp_path, ops_tl):
     six = _nudge_len(tmp_path / "a", 21600.0, ops_tl)
     three = _nudge_len(tmp_path / "b", 10800.0, ops_tl)
     assert three > six
+
+
+def test_ops_timeline_requires_nudging_dt(tmp_path):
+    body = "system: {name: x}\nforcing:\n  ocean:\n    obc: {ops_timeline: true}\n"
+    with pytest.raises(ValueError, match="nudging.dt"):
+        _load(tmp_path, body)
+    ok = _load(tmp_path, body + "    nudging: {dt: 21600}\n")
+    assert ok.obc_ops_timeline is True and ok.nudging_dt == 21600.0
+
+
+def test_adt_enabled_string_false_is_false(tmp_path):
+    body = "system: {name: x}\nforcing:\n  ocean:\n    adt: {enabled: 'false'}\n"
+    assert _load(tmp_path, body).adt_enabled is False

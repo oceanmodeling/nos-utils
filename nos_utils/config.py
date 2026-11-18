@@ -244,7 +244,8 @@ class ForcingConfig:
     adt_enabled: bool = False
     # Per-system: from_yaml requires forcing.ocean.adt.datum_offset when ADT is enabled. MJ (11/18/26)
     adt_datum_offset: float = 0.0
-    # ADT subset box (lon_min, lon_max, lat_min, lat_max); None uses the SSH_1 extent. MJ (11/18/26)
+    # ADT subset box (lon_min, lon_max, lat_min, lat_max) in the system's own longitude convention
+    # (0-360 for the Pacific); None uses the SSH_1 extent. MJ (11/18/26)
     adt_roi: Optional[Tuple[float, float, float, float]] = None
     # Rerun archive/tar also carries temnu/salnu/surface_restore with the Pacific names; off keeps main's set. MJ (10/24/26)
     obc_archive_extended: bool = False
@@ -985,7 +986,6 @@ class ForcingConfig:
             raise ValueError(f"obc.interp_mode must be 0 or 1, got {_interp_mode!r}")
         # Only the ATL ops chain holds elev2D at its first record. MJ (10/02/26)
         _hold = obc.get("ssh_hold_first_record") if isinstance(obc, dict) else None
-        _sys = data.get("system", {}) if isinstance(data.get("system"), dict) else {}
         _hold = _strict_bool(_hold, "obc.ssh_hold_first_record", False)
         _ops_tl = obc.get("ops_timeline") if isinstance(obc, dict) else None
         _ops_tl = _strict_bool(_ops_tl, "obc.ops_timeline", False)
@@ -1009,23 +1009,22 @@ class ForcingConfig:
 
         # Ops atmospheric parity is opt-in per system: forcing.atmospheric.gfs.ops_timeline,
         # hrrr.rotate_winds / blend_rotate_winds / blend_weight / small_grib. MJ (11/18/26)
-        _ops_sflux = False
         _gfs_ops_tl = _strict_bool(
             atm.get("gfs", {}).get("ops_timeline") if isinstance(atm.get("gfs"), dict) else None,
-            "forcing.atmospheric.gfs.ops_timeline", _ops_sflux)
+            "forcing.atmospheric.gfs.ops_timeline", False)
         _hrrr_rot = _strict_bool(
             atm.get("hrrr", {}).get("rotate_winds") if isinstance(atm.get("hrrr"), dict) else None,
-            "forcing.atmospheric.hrrr.rotate_winds", not _ops_sflux)
+            "forcing.atmospheric.hrrr.rotate_winds", True)
         _datm_rot = _strict_bool(
             atm.get("hrrr", {}).get("blend_rotate_winds") if isinstance(atm.get("hrrr"), dict) else None,
-            "forcing.atmospheric.hrrr.blend_rotate_winds", not _ops_sflux)
+            "forcing.atmospheric.hrrr.blend_rotate_winds", True)
         _hw = atm.get("hrrr", {}).get("blend_weight") if isinstance(atm.get("hrrr"), dict) else None
-        _hrrr_weight = float(_hw) if _hw is not None else (0.99 if _ops_sflux else 1.0)
+        _hrrr_weight = float(_hw) if _hw is not None else 1.0
         if not 0.0 < _hrrr_weight <= 1.0:
             raise ValueError("forcing.atmospheric.hrrr.blend_weight must be in (0, 1]")
         _hrrr_sg = _strict_bool(
             atm.get("hrrr", {}).get("small_grib") if isinstance(atm.get("hrrr"), dict) else None,
-            "forcing.atmospheric.hrrr.small_grib", _ops_sflux)
+            "forcing.atmospheric.hrrr.small_grib", False)
 
         # ADT satellite SSH blending
         adt = ocean.get("adt", {}) if isinstance(ocean, dict) else {}
@@ -1033,11 +1032,14 @@ class ForcingConfig:
         _adt_wt = adt.get("weight_file") if isinstance(adt, dict) else None
         _adt_wt = Path(_adt_wt) if _adt_wt else None
         _adt_off = adt.get("datum_offset") if isinstance(adt, dict) else None
-        _adt_on = bool(adt.get("enabled", False)) if isinstance(adt, dict) else False
+        _adt_on = _strict_bool(adt.get("enabled") if isinstance(adt, dict) else None,
+                               "forcing.ocean.adt.enabled", False)
         if _adt_off is None and _adt_on:
             raise ValueError("forcing.ocean.adt.datum_offset is required when ADT is enabled")
         _adt_off = 0.0 if _adt_off is None else float(_adt_off)
         _adt_roi = adt.get("roi") if isinstance(adt, dict) else None
+        if _ops_tl and (not isinstance(nudge, dict) or nudge.get("dt") is None):
+            raise ValueError("forcing.ocean.nudging.dt is required when obc.ops_timeline is true")
         if _adt_roi is not None:
             if not isinstance(_adt_roi, (list, tuple)) or len(_adt_roi) != 4:
                 raise ValueError("forcing.ocean.adt.roi must be [lon_min, lon_max, lat_min, lat_max]")
@@ -1116,7 +1118,7 @@ class ForcingConfig:
             datm_rotate_hrrr_winds=_datm_rot,
             datm_hrrr_weight=_hrrr_weight,
             hrrr_small_grib=_hrrr_sg,
-            adt_enabled=adt.get("enabled", False) if isinstance(adt, dict) else False,
+            adt_enabled=_adt_on,
             adt_datum_offset=_adt_off,
             adt_roi=_adt_roi,
             adt_weight_file=_adt_wt,
