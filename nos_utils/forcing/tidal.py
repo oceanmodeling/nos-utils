@@ -277,7 +277,8 @@ class TidalProcessor(ForcingProcessor):
         The executable reads bctides.in_template and writes bctides.in with
         accurate nodal factors for the specified start time.
         """
-        exe_names = ["nos_ofs_create_tide_fac_schism", "stofs_3d_atl_tide_fac"]
+        exe_names = (list(getattr(self.config, "tide_fac_executables", None) or [])
+                     or ["nos_ofs_create_tide_fac_schism", "stofs_3d_atl_tide_fac"])
         env_dirs = ["EXECnos", "EXECofs", "EXECstofs3d"]
 
         exe = None

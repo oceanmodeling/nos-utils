@@ -268,7 +268,9 @@ class PrepOrchestrator:
         if "hrrr" in self.paths and self.config.met_num >= 2:
             parallel_tasks["HRRR"] = lambda: self._run_hrrr(output_dir, phase, time_hotstart)
 
-        if "nwm" in self.paths and (self.is_stofs or not self.skip_legacy):
+        if not self.config.nwm_enabled:
+            log.info("NWM river disabled by forcing.river.enabled")
+        elif "nwm" in self.paths and (self.is_stofs or not self.skip_legacy):
             parallel_tasks["NWM"] = lambda: self._run_nwm(output_dir, phase, time_hotstart)
         elif self.skip_legacy:
             log.info("Skipping NWM river (handled by legacy shell)")
@@ -304,6 +306,9 @@ class PrepOrchestrator:
                     "trying climatology / previous-cycle archive only"
                 )
             results.append(self._run_st_lawrence(output_dir))
+
+        if self.config.river_ob_clim_enabled:
+            results.append(self._run_river_ob_clim(output_dir))
 
         # GFS-Wave boundary spectra (WW3 nest.ww3): independent of
         # GFS/HRRR/NWM/RTOFS, only needs its own COMINgfswave tree.
@@ -344,6 +349,10 @@ class PrepOrchestrator:
         if self.config.nudging_enabled and "rtofs" in self.paths:
             results.append(self._run_nudging(output_dir, phase, time_hotstart))
 
+        # Surface restore needs RTOFS to have completed
+        if getattr(self.config, "surface_restore_enabled", False) and "rtofs" in self.paths:
+            results.append(self._run_surface_restore(output_dir, phase))
+
         # param.nml only needs time_hotstart
         if "fix" in self.paths:
             results.append(self._run_param_nml(output_dir, phase, time_hotstart))
@@ -371,6 +380,8 @@ class PrepOrchestrator:
 
         if declared is not None:
             critical_sources = set(declared)
+            if not self.config.nwm_enabled:
+                critical_sources.discard("NWM")
             log.info(f"Critical prep sources (declared): {sorted(critical_sources)}")
 
             # A stage is only created when its input path is present
@@ -398,7 +409,7 @@ class PrepOrchestrator:
             # `prep.critical_sources` is the single switch that tightens it.
             critical_sources = {"GFS", "PARAM_NML", "TIDAL"}
             if self.is_stofs:
-                critical_sources.update({"NWM", "RTOFS"})
+                critical_sources.update({"NWM", "RTOFS"} if self.config.nwm_enabled else {"RTOFS"})
             log.info(f"Critical prep sources (heuristic): {sorted(critical_sources)}")
 
             failed_critical = sorted(critical_sources & failed)
@@ -568,6 +579,13 @@ class PrepOrchestrator:
         )
         return proc.process()
 
+    def _run_river_ob_clim(self, output_dir: Path) -> ForcingResult:
+        """Boundary-river flux.th / TEM_1.th from the fix-dir climatology (STOFS-3D-PAC)."""
+        from .forcing.river_clim import RiverOBClimProcessor
+
+        fix = Path(self.paths["fix"]) if "fix" in self.paths else output_dir / "_no_fix"
+        return RiverOBClimProcessor(self.config, fix, output_dir).process()
+
     def _run_st_lawrence(self, output_dir: Path) -> ForcingResult:
         """St. Lawrence River: Canadian hydrometric CSV + GFS-rad temperature.
 
@@ -714,12 +732,35 @@ class PrepOrchestrator:
     # standard archive basename under $COMOUT_PREV/rerun/ (see
     # stofs_3d_atl_create_obc_3d_th_non_adjust.sh:641-642). The archive
     # file is stored as `<run>.<cycle>.<archive_base>.nc`.
-    _OBC_ARCHIVE_NAMES: Dict[str, str] = {
+    _OBC_ARCHIVE_BASE: Dict[str, str] = {
         "elev2D.th.nc": "elev2dth_non_adj",
         "TEM_3D.th.nc": "tem3dth",
         "SAL_3D.th.nc": "sal3dth",
         "uv3D.th.nc": "uv3dth",
     }
+    _OBC_TAR_BASE = ("elev2D.th.nc", "TEM_3D.th.nc", "SAL_3D.th.nc",
+                     "uv3D.th.nc", "TEM_nu.nc", "SAL_nu.nc")
+
+    @property
+    def _OBC_ARCHIVE_NAMES(self) -> Dict[str, str]:
+        """Rerun-archive map: as nos-utils main unless obc_archive_extended is set (Pacific). MJ (10/24/26)"""
+        names = dict(self._OBC_ARCHIVE_BASE)
+        if getattr(self.config, "obc_archive_extended", False):
+            names["elev2D.th.nc"] = "elev2dth_non_adj" if getattr(self.config, "dynamic_adjust_enabled", False) else "elev2dth"
+            if getattr(self.config, "nudging_enabled", False):
+                names["TEM_nu.nc"] = "temnu"
+                names["SAL_nu.nc"] = "salnu"
+            if getattr(self.config, "surface_restore_enabled", False):
+                names["surface_restore.nc"] = "surface_restore"
+        return names
+
+    @property
+    def _obc_tar_files(self) -> List[str]:
+        files = list(self._OBC_TAR_BASE)
+        if getattr(self.config, "obc_archive_extended", False) and getattr(
+                self.config, "surface_restore_enabled", False):
+            files.append("surface_restore.nc")
+        return files
 
     def _obc_archive_name(self, archive_base: str, phase: str) -> str:
         """``<run>.<cycle>.<base>.nc``; the forecast-phase file gets ``.fcst`` before the suffix.
@@ -773,7 +814,7 @@ class PrepOrchestrator:
                         n_t = int(ds.variables["time"].shape[0])
                     else:
                         continue
-                if source_counts and self.config.obc_ops_timeline:
+                if source_counts and (self.config.obc_ops_timeline or self.config.obc_slot_records):
                     n_t = int(source_counts["2d" if name == "elev2D.th.nc" else "3d"])
                 file_dims[name] = n_t
                 if n_t < min_t:
@@ -869,6 +910,8 @@ class PrepOrchestrator:
         (nco_v315 scripts/stofs_3d_atl/exstofs_3d_atl_prep_processing.sh:398-746). MJ (10/05/26)
         """
         wanted = list(self._OPS_RUN_INPUTS)
+        if getattr(self.config, "surface_restore_enabled", False):
+            wanted.append("surface_restore.nc")
         if self.config.nws == 4:
             wanted += ["gfs_forcing.nc"] + (["hrrr_forcing.nc"] if self.config.met_num >= 2 else [])
         else:
@@ -1049,6 +1092,27 @@ class PrepOrchestrator:
             self.config, input_dir, output_dir,
             nudge_weight_file=nudge_weight_file,
             rtofs_input_path=rtofs_path,
+            phase=phase,
+        )
+        return proc.process()
+
+    def _run_surface_restore(self, output_dir: Path, phase: str = "nowcast") -> ForcingResult:
+        """Step 5c: Surface restore (STOFS-3D-PAC)."""
+        from .forcing.surface_restore import SurfaceRestoreProcessor
+
+        weight_file = getattr(self.config, "surface_restore_weight_file", None)
+        if not weight_file:
+            fix_dir = self.paths.get("fix")
+            if fix_dir:
+                for pattern in ["*.nudge.gr3", "*.TEM_nudge.gr3"]:
+                    matches = sorted(Path(fix_dir).glob(pattern))
+                    if matches:
+                        weight_file = matches[0]
+                        break
+
+        proc = SurfaceRestoreProcessor(
+            self.config, self.paths["rtofs"], output_dir,
+            weight_file=weight_file,
             phase=phase,
         )
         return proc.process()
@@ -1255,10 +1319,7 @@ class PrepOrchestrator:
             # --- COMMON: OBC (phase-specific, backward-compat) ---
             {
                 "tar_name": f"{prefix}.{cycle}.{pdy}.obc.{phase}.tar",
-                "payload_files": [
-                    "elev2D.th.nc", "TEM_3D.th.nc", "SAL_3D.th.nc",
-                    "uv3D.th.nc", "TEM_nu.nc", "SAL_nu.nc",
-                ],
+                "payload_files": self._obc_tar_files,
                 "condition": True,
                 "label": "OBC",
             },
@@ -1362,7 +1423,8 @@ class PrepOrchestrator:
         """
         import shutil
 
-        if not getattr(self.config, "st_lawrence_enabled", False):
+        if not (getattr(self.config, "st_lawrence_enabled", False)
+                or getattr(self.config, "river_ob_clim_enabled", False)):
             return
 
         prefix = self.run_name
@@ -1590,9 +1652,8 @@ class PrepOrchestrator:
             # unchanged, executed verbatim when the manifest flag is OFF.
 
             # Tar OBC files (phase-specific): obc.nowcast.tar / obc.forecast.tar,
-            # each with all 6 files (boundary + nudging).
-            obc_files = ["elev2D.th.nc", "TEM_3D.th.nc", "SAL_3D.th.nc", "uv3D.th.nc",
-                         "TEM_nu.nc", "SAL_nu.nc"]
+            # each with all active files (boundary + nudging + surface restore).
+            obc_files = self._obc_tar_files
             existing_obc = [work_dir / f for f in obc_files if (work_dir / f).exists()]
             if existing_obc:
                 # Phase-specific tar (backward compat): obc.nowcast.tar / obc.forecast.tar

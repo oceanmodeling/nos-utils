@@ -557,9 +557,11 @@ def _yaml_cfg(tmp_path, name, obc_extra=""):
 
 
 def test_yaml_hold_default_by_system_and_override(tmp_path):
-    assert _yaml_cfg(tmp_path, "stofs_3d_atl_ufs").obc_ssh_hold_first_record is True
+    assert _yaml_cfg(tmp_path, "stofs_3d_atl_ufs").obc_ssh_hold_first_record is False
+    on = _yaml_cfg(tmp_path, "stofs_3d_atl_ufs", "      ssh_hold_first_record: true\n")
+    assert on.obc_ssh_hold_first_record is True
     assert _yaml_cfg(tmp_path, "stofs_3d_pac_ufs").obc_ssh_hold_first_record is False
-    off = _yaml_cfg(tmp_path, "stofs_3d_atl_ufs", "      ssh_hold_first_record: false\n")
+    off = _yaml_cfg(tmp_path, "stofs_3d_pac_ufs", "      ssh_hold_first_record: false\n")
     assert off.obc_ssh_hold_first_record is False
 
 

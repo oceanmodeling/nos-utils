@@ -75,7 +75,7 @@ def cmd_list(args):
     print("  secofs          — SE Coastal (6h nowcast, 48h forecast)")
     print("  secofs_ufs      — SE Coastal UFS-Coastal (nws=4)")
     print("  stofs_3d_atl    — Atlantic Storm Surge (24h nowcast, 108h forecast)")
-    print("  stofs_3d_pac    — Pacific Storm Surge (24h nowcast, 108h forecast)")
+    print("  stofs_3d_pac    — Pacific Storm Surge (24h nowcast, 48h forecast)")
     print("  stofs_3d_pac_ufs — Pacific Storm Surge UFS-Coastal (nws=4, 0-360 domain)")
     print("  ensemble        — Ensemble member forcing")
     print()

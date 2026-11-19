@@ -478,8 +478,9 @@ class TestConfigFlag:
         y.write_text(f"system:\n  name: {name}\n{extra}")
         return ForcingConfig.from_yaml(y, pdy="20261001", cyc=12)
 
-    def test_yaml_by_name(self, tmp_path):
-        assert self._yaml(tmp_path, "stofs_3d_atl_ufs").ops_bad_day_checks is True
+    def test_yaml_key_opt_in_not_name(self, tmp_path):
+        assert self._yaml(tmp_path, "stofs_3d_atl_ufs").ops_bad_day_checks is False
+        assert self._yaml(tmp_path, "secofs_ufs", "prep:\n  ops_bad_day_checks: true\n").ops_bad_day_checks is True
         assert self._yaml(tmp_path, "secofs_ufs").ops_bad_day_checks is False
         assert self._yaml(tmp_path, "stofs_3d_ak_ufs").ops_bad_day_checks is False
 

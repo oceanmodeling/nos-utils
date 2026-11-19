@@ -204,5 +204,5 @@ def test_config_weight_defaults_and_yaml(tmp_path):
     assert str(ForcingConfig.for_stofs_3d_atl_ufs("20260401", 12).adt_weight_file) == \
         "stofs_3d_atl_ufs.adt_weight.nc"
     y = tmp_path / "x.yaml"
-    y.write_text("system: {name: foo}\nforcing:\n  ocean:\n    adt: {enabled: true, weight_file: my.nc}\n")
+    y.write_text("system: {name: foo}\nforcing:\n  ocean:\n    adt: {enabled: true, datum_offset: -0.45, weight_file: my.nc}\n")
     assert str(ForcingConfig.from_yaml(y).adt_weight_file) == "my.nc"
